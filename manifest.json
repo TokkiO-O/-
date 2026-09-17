@@ -1,0 +1,12 @@
+	{
+	    "display_name": "美化管理 Theme Manager",
+	    "loading_order": 100,
+	    "requires": [],
+	    "optional": [],
+	    "js": "index.js",
+	    "css": "style.css",
+	    "author": "yourname",
+	    "version": "0.1.0",
+	    "homePage": "https://github.com/yourname/st-theme-manager",
+	    "auto_update": true
+	}
