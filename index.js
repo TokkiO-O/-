@@ -1,7 +1,7 @@
 /**
- * 美化管理 Theme Manager v0.7.1（推倒重建）
+ * 美化管理 Theme Manager v0.7.3（推倒重建）
  *
- * 工程骨架 + M1 库 + M2 iframe沙盒分屏预览 + M3.1 代码编辑
+ * 工程骨架 + M1 库 + M2 真实页面实时预览 + 光标高亮 + M3.1 代码编辑
  * + M4 块开关 + M7 导入导出 + M9 移动体检 + 酒馆同步
  *
  * 原则：独立 style[data-theme-id]；预览图只进 IDB；编辑=真实页面注入
@@ -571,7 +571,7 @@ body{
             const l = document.createElement("link"); l.rel = "stylesheet"; l.href = url; l.onload = resolve; l.onerror = resolve; document.head.appendChild(l);
         });
     }
-    async function createEditor(container, { value = "", onChange, onSave } = {}) {
+    async function createEditor(container, { value = "", onChange, onSave, onCursor } = {}) {
         container.innerHTML = "";
         try {
             let base = null;
@@ -589,14 +589,31 @@ body{
                 extraKeys: { "Ctrl-S": () => onSave?.(), "Cmd-S": () => onSave?.() },
             });
             cm.on("change", () => onChange?.(cm.getValue()));
-            return { getValue: () => cm.getValue(), setValue: v => cm.setValue(v || ""), focus: () => cm.focus(), refresh: () => cm.refresh() };
+            if (onCursor) {
+                let ct;
+                const emit = () => {
+                    clearTimeout(ct);
+                    ct = setTimeout(() => {
+                        try { onCursor(cm.getValue(), cm.indexFromPos(cm.getCursor())); } catch { /* */ }
+                    }, 100);
+                };
+                cm.on("cursorActivity", emit);
+                cm.on("mousedown", emit);
+            }
+            const api = { _cm: cm, getValue: () => cm.getValue(), setValue: v => cm.setValue(v || ""), focus: () => cm.focus(), refresh: () => cm.refresh() };
+            return api;
         } catch (e) {
             console.warn("[美化管理] CodeMirror 降级", e);
             const ta = document.createElement("textarea");
             ta.className = "tm-plain-editor"; ta.value = value || ""; ta.spellcheck = false;
             container.appendChild(ta);
             ta.addEventListener("input", () => onChange?.(ta.value));
-            return { getValue: () => ta.value, setValue: v => { ta.value = v || ""; }, focus: () => ta.focus(), refresh: () => {} };
+            if (onCursor) {
+                const emit = () => onCursor(ta.value, ta.selectionStart || 0);
+                ta.addEventListener("click", emit);
+                ta.addEventListener("keyup", emit);
+            }
+            return { _ta: ta, getValue: () => ta.value, setValue: v => { ta.value = v || ""; }, focus: () => ta.focus(), refresh: () => {} };
         }
     }
 
@@ -705,6 +722,194 @@ body{
         $(".tm-report-close").on("click", () => $("#tm_report").remove());
     }
 
+
+    /** 从光标位置解析当前 CSS 规则选择器 */
+    function selectorsAtCursor(css, index) {
+        if (!css || index < 0) return [];
+        let i = Math.min(index, css.length - 1);
+        while (i > 0 && css[i] !== "{") {
+            if (css[i] === "}" && i < index) break;
+            i--;
+        }
+        if (css[i] !== "{") return [];
+        let j = i - 1;
+        while (j >= 0 && css[j] !== "}") j--;
+        let raw = css.slice(j + 1, i).replace(/\/\*[\s\S]*?\*\//g, "").trim();
+        if (!raw) return [];
+        // 去掉 @media 等，取最内层选择器段
+        if (raw.includes("{")) {
+            const last = raw.lastIndexOf("{");
+            raw = raw.slice(last + 1).trim();
+        }
+        // 去掉尾部杂项
+        raw = raw.replace(/^[^{]*@[\w-]+[^{]*$/m, "").trim();
+        if (!raw || raw.startsWith("@")) return [];
+        return raw.split(",").map(s => s.trim()).filter(s => s && !s.startsWith("@"));
+    }
+
+    let _hlTimer = null;
+    function clearPageHighlight() {
+        document.querySelectorAll(".tm-hl").forEach(el => el.classList.remove("tm-hl"));
+    }
+    /** 在真实页面高亮选择器命中的元素 */
+    function highlightInPage(selectors) {
+        clearTimeout(_hlTimer);
+        clearPageHighlight();
+        if (!selectors?.length) return;
+        let first = null;
+        for (const sel of selectors) {
+            let list;
+            try { list = document.querySelectorAll(sel); } catch { continue; }
+            list.forEach(el => {
+                // 不高亮扩展自己的面板
+                if (el.closest("#tm_panel, #tm_edit, #tm_report, #tm_menu_entry")) return;
+                el.classList.add("tm-hl");
+                if (!first) first = el;
+            });
+        }
+        if (first) {
+            try { first.scrollIntoView({ block: "center", behavior: "smooth" }); } catch { /* */ }
+        }
+        _hlTimer = setTimeout(clearPageHighlight, 1800);
+    }
+
+    /** 解析 CSS 文本中的规则：{ selector, start, brace, end } */
+    function parseCssRules(css) {
+        const rules = [];
+        const src = String(css || "");
+        let i = 0;
+        while (i < src.length) {
+            // skip comments
+            if (src[i] === "/" && src[i + 1] === "*") {
+                const end = src.indexOf("*/", i + 2);
+                i = end < 0 ? src.length : end + 2;
+                continue;
+            }
+            if (src[i] === "{") {
+                // find selector start: after previous } or beginning
+                let s = i - 1;
+                while (s >= 0 && /\s/.test(src[s])) s--;
+                let start = s;
+                while (start >= 0 && src[start] !== "}" && src[start] !== "{" ) start--;
+                start += 1;
+                while (start < i && /\s/.test(src[start])) start++;
+                let sel = src.slice(start, i).replace(/\/\*[\s\S]*?\*\//g, "").trim();
+                // balance braces for body
+                let depth = 0, j = i;
+                for (; j < src.length; j++) {
+                    if (src[j] === "/" && src[j + 1] === "*") {
+                        const e = src.indexOf("*/", j + 2);
+                        j = e < 0 ? src.length : e + 1;
+                        continue;
+                    }
+                    if (src[j] === "{") depth++;
+                    else if (src[j] === "}") {
+                        depth--;
+                        if (depth === 0) { j++; break; }
+                    }
+                }
+                if (sel && !sel.startsWith("@")) {
+                    // drop trailing @media junk: take last segment if nested weirdly
+                    const parts = sel.split("{");
+                    sel = parts[parts.length - 1].trim();
+                    if (sel && !sel.startsWith("@")) {
+                        rules.push({ selector: sel, start, brace: i, end: j });
+                    }
+                }
+                i = j;
+                continue;
+            }
+            i++;
+        }
+        return rules;
+    }
+
+    /** 元素 → 命中的 CSS 规则（按选择器长度粗略排序，更具体优先） */
+    function rulesMatchingElement(css, el) {
+        if (!el || !css) return [];
+        const hit = [];
+        for (const rule of parseCssRules(css)) {
+            const sels = rule.selector.split(",").map(s => s.trim()).filter(Boolean);
+            for (const sel of sels) {
+                try {
+                    if (el.matches(sel)) {
+                        hit.push({ ...rule, matched: sel });
+                        break;
+                    }
+                } catch { /* invalid selector */ }
+            }
+        }
+        hit.sort((a, b) => b.matched.length - a.matched.length);
+        return hit;
+    }
+
+    function jumpEditorToIndex(index) {
+        const ed = ED.editor;
+        if (!ed) return;
+        // CodeMirror
+        if (ed._cm) {
+            const cm = ed._cm;
+            const pos = cm.posFromIndex(Math.max(0, index));
+            cm.setCursor(pos);
+            cm.scrollIntoView(pos, 80);
+            cm.focus();
+            return;
+        }
+        // textarea fallback via internal ref
+        if (ed._ta) {
+            const ta = ed._ta;
+            ta.focus();
+            ta.setSelectionRange(index, index);
+            // rough scroll
+            const lines = ta.value.slice(0, index).split("\n").length;
+            ta.scrollTop = Math.max(0, (lines - 5) * 16);
+        }
+    }
+
+    function onPagePick(e) {
+        if (!ED.themeId || $("#tm_edit").hasClass("tm-hidden")) return;
+        const t = e.target;
+        if (!(t instanceof Element)) return;
+        if (t.closest("#tm_panel, #tm_edit, #tm_report, #tm_menu_entry, #extensionsMenu")) return;
+        // 忽略纯文档根
+        if (t === document.documentElement || t === document.body) return;
+
+        const css = ED.editor?.getValue?.() || "";
+        // 从点击目标向上找，直到命中某条规则
+        let el = t;
+        let hits = [];
+        while (el && el !== document.body) {
+            hits = rulesMatchingElement(css, el);
+            if (hits.length) break;
+            el = el.parentElement;
+        }
+        if (!hits.length) {
+            toastr?.info?.("当前 CSS 中没有匹配该元素的规则");
+            return;
+        }
+        e.preventDefault();
+        e.stopPropagation();
+        const best = hits[0];
+        jumpEditorToIndex(best.start);
+        // 高亮页面元素 + 短暂提示
+        clearPageHighlight();
+        el.classList.add("tm-hl");
+        clearTimeout(_hlTimer);
+        _hlTimer = setTimeout(clearPageHighlight, 1800);
+        toastr?.info?.(`已跳到规则：${best.matched.slice(0, 48)}${best.matched.length > 48 ? "…" : ""}`);
+    }
+
+    function enablePagePick() {
+        document.addEventListener("click", onPagePick, true);
+        document.body.classList.add("tm-pick-mode");
+    }
+    function disablePagePick() {
+        document.removeEventListener("click", onPagePick, true);
+        document.body.classList.remove("tm-pick-mode");
+        clearPageHighlight();
+    }
+
+
     async function openEditor(themeId) {
         try {
             if (ED.dirty && !confirm("有未保存改动，仍要切换？")) return;
@@ -722,28 +927,24 @@ body{
                     onChange: v => {
                         ED.dirty = true;
                         clearTimeout(ED.liveTimer);
-                        ED.liveTimer = setTimeout(() => {
-                            ED.preview?.setCss(v);
-                            setLivePreviewCss(v);
-                        }, 280);
+                        ED.liveTimer = setTimeout(() => setLivePreviewCss(v), 280);
                     },
                     onSave: () => saveEditor(),
+                    onCursor: (css, index) => {
+                        const sels = selectorsAtCursor(css, index);
+                        if (sels.length) highlightInPage(sels);
+                    },
                 });
-                ED.preview = new PreviewManager($("#tm_edit_prev"));
-                ED.preview.mount();
             }
             const css = String(t.rawCss || "");
             ED.editor.setValue(css);
             ED.dirty = false;
-            ED.preview.css = css;
-            ED.preview.rebuild();
             setLivePreviewCss(css);
             refreshAll();
-            requestAnimationFrame(() => {
-                try { ED.editor.refresh(); } catch { /* */ }
-                try { ED.preview?.relayout(); } catch { /* */ }
-            });
+            requestAnimationFrame(() => { try { ED.editor.refresh(); } catch { /* */ } });
             ED.editor.focus();
+            enablePagePick();
+            toastr?.info?.("真实预览已开启：改代码即生效；点击页面元素可跳到对应规则");
         } catch (e) {
             console.error("[美化管理] openEditor", e);
             toastr?.error?.("打开编辑失败：" + (e.message || e));
@@ -751,7 +952,10 @@ body{
     }
     function closeEditor() {
         if (ED.dirty && !confirm("有未保存改动，仍要离开？")) return;
-        clearLivePreview(); ED.themeId = null; ED.dirty = false;
+        disablePagePick();
+        clearLivePreview();
+        clearPageHighlight();
+        ED.themeId = null; ED.dirty = false;
         $("#tm_edit").addClass("tm-hidden"); $("#tm_panel").removeClass("tm-hidden");
         refreshAll(); renderList();
     }
@@ -838,12 +1042,11 @@ body{
           <div class="tm-edit-head">
             <button type="button" id="tm_edit_back" class="menu_button">← 返回</button>
             <input id="tm_edit_name" class="text_pole" placeholder="主题名称">
-            <span class="tm-edit-info">左代码 · 右 iframe 沙盒实时预览（≈300ms）· Ctrl+S 保存 · Esc 返回</span>
+            <span class="tm-edit-info">真实预览 · 点页面跳转规则 · 光标高亮元素 · Ctrl+S 保存 · Esc 返回</span>
             <button type="button" id="tm_edit_save" class="menu_button">保存</button>
           </div>
           <div class="tm-edit-body">
             <div id="tm_edit_code"></div>
-            <div id="tm_edit_prev" class="tm-preview"></div>
           </div>
         </div>`);
 
@@ -954,7 +1157,7 @@ body{
                 renderList();
             } catch (e) { console.warn("[美化管理] 启动同步失败", e); }
         })();
-        console.info("[美化管理] v0.7.1 已启动");
+        console.info("[美化管理] v0.7.3 已启动");
     }
 
     if (event_types?.APP_READY) {

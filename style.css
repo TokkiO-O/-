@@ -1,5 +1,14 @@
-/* Theme Manager v0.7.1 — M2 分屏预览 */
+/* Theme Manager v0.7.2 — 真实页面实时预览 + 光标高亮 */
 .tm-hidden { display: none !important; }
+
+/* 页面高亮（光标对应选择器） */
+body.tm-pick-mode { cursor: crosshair; }
+body.tm-pick-mode a, body.tm-pick-mode button { cursor: crosshair; }
+.tm-hl {
+  outline: 2px solid #ff6b6b !important;
+  box-shadow: 0 0 0 4px rgba(255, 107, 107, 0.35) !important;
+  transition: outline 0.15s, box-shadow 0.15s;
+}
 
 #tm_panel {
   position: fixed; right: 12px; top: 52px;
@@ -53,27 +62,24 @@
 .tm-mi:hover { background: rgba(255,255,255,.08); }
 .tm-mi.tm-danger:hover { background: rgba(255,80,80,.18); color: #ff7b7b; }
 
-/* 编辑：全屏分屏 左代码 右预览 */
+/* 编辑侧栏：不挡主界面，真实页面即预览 */
 #tm_edit {
-  position: fixed; inset: 0; z-index: 30001;
+  position: fixed; top: 0; right: 0; bottom: 0;
+  width: min(480px, 42vw);
+  z-index: 30001;
   display: flex; flex-direction: column; gap: 8px;
   padding: 10px; box-sizing: border-box;
-  background: rgba(12, 12, 20, 0.96);
+  background: var(--SmartThemeBlurTintColor, #14141f);
   color: var(--SmartThemeBodyColor, #eee);
+  border-left: 1px solid var(--SmartThemeBorderColor, #444);
+  box-shadow: -8px 0 28px rgba(0,0,0,.4);
 }
 #tm_edit.tm-hidden { display: none !important; }
 .tm-edit-head { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; flex-shrink: 0; }
-#tm_edit_name { width: 180px; min-width: 0; }
-.tm-edit-info { flex: 1; min-width: 140px; font-size: 12px; opacity: .65; }
-
-.tm-edit-body {
-  flex: 1 1 auto; min-height: 0;
-  display: flex; flex-direction: row; gap: 10px;
-}
-#tm_edit_code {
-  flex: 1 1 46%; min-width: 0; min-height: 0;
-  display: flex; flex-direction: column;
-}
+#tm_edit_name { width: 140px; min-width: 0; }
+.tm-edit-info { flex: 1; min-width: 100px; font-size: 11px; opacity: .7; line-height: 1.35; }
+.tm-edit-body { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+#tm_edit_code { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 #tm_edit_code .CodeMirror {
   flex: 1; height: 100% !important; width: 100%; font-size: 13px;
   border-radius: 10px; border: 1px solid #3a3a4e;
@@ -85,31 +91,6 @@
   font-family: var(--monoFontFamily, ui-monospace, monospace); font-size: 13px;
 }
 
-/* M2 预览器 */
-.tm-preview, #tm_edit_prev {
-  flex: 1 1 54%; min-width: 0; min-height: 0;
-  display: flex; flex-direction: column;
-  border: 1px solid #3a3a4e; border-radius: 10px; overflow: hidden;
-  background: #14141f;
-}
-.tm-prev-bar {
-  display: flex; flex-wrap: wrap; gap: 6px; align-items: center; justify-content: space-between;
-  padding: 6px; background: rgba(255,255,255,.04); flex-shrink: 0;
-}
-.tm-prev-devices, .tm-prev-right { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
-.tm-dev.tm-on { border-color: var(--SmartThemeQuoteColor, #7bd88f); color: var(--SmartThemeQuoteColor, #7bd88f); }
-.tm-prev-stage {
-  flex: 1 1 auto; min-height: 0; overflow: auto;
-  display: flex; justify-content: center; align-items: flex-start; padding: 12px;
-}
-.tm-prev-framebox {
-  overflow: hidden; border-radius: 8px;
-  box-shadow: 0 4px 18px rgba(0,0,0,.5); background: #000; flex-shrink: 0;
-}
-.tm-prev-frame {
-  border: 0; display: block; transform-origin: top left; background: #181825;
-}
-
 #tm_report { position: fixed; inset: 0; z-index: 31000; background: rgba(0,0,0,.5); display: grid; place-items: center; }
 .tm-report { width: min(560px, 90vw); max-height: 70vh; overflow: auto;
   background: var(--SmartThemeBlurTintColor, #26263a); color: var(--SmartThemeBodyColor, #eee);
@@ -117,8 +98,7 @@
 .tm-report-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
 .tm-report pre { white-space: pre-wrap; font-size: 12.5px; line-height: 1.75; margin: 0; }
 
-@media (max-width: 960px) {
-  .tm-edit-body { flex-direction: column; }
-  #tm_edit_code, #tm_edit_prev { flex: 1 1 50%; min-height: 40vh; }
+@media (max-width: 900px) {
+  #tm_edit { width: min(100vw, 100%); }
   #tm_list[data-view="grid"] { grid-template-columns: 1fr; }
 }
