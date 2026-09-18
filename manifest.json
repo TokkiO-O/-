@@ -5,8 +5,8 @@
 	    "optional": [],
 	    "js": "index.js",
 	    "css": "style.css",
-	    "author": "yourname",
-	    "version": "0.5.0",
-	    "homePage": "https://github.com/yourname/st-theme-manager",
+	    "author": "TokkiO-O",
+	    "version": "0.5.1",
+	    "homePage": "https://github.com/TokkiO-O/Theme-Manager",
 	    "auto_update": true
 	}
