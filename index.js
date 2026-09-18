@@ -1,12 +1,11 @@
 /**
- * 美化管理 Theme Manager v0.6.5
+ * 美化管理 Theme Manager v0.6.7
  *
- * v0.6.5 主要变更：
- *   1. 编辑预览改为「多页面纯净壳」（聊天/欢迎/角色/扩展 + 顶栏/侧栏）
- *      用 CSS 变量 + 主题，不再注入整页外链以免半高错位
- *   2. 列表缺失缩略图自动后台生成；布局高度链加固
+ * v0.6.7 主要变更：
+ *   1. 修复「编辑」打不开：先显示编辑屏再初始化编辑器，失败有提示
+ *   2. 修复「…」菜单闪退：卡片补回 .tm-menu，点击停止冒泡
  *
- * v0.6.5：光标高亮、渐变缩略图回退
+ * v0.6.7：光标高亮、渐变缩略图回退
  *
  * v0.6.0 主要变更：接入酒馆原生主题字段、导入导出、删除防复活等
  */
@@ -296,16 +295,16 @@
     // 酒馆 36 字段 → CSS（供注入兜底 / 编辑器 / 预览器；变量名与酒馆内部一致）
     function tavernToCss(tv) {
         const colorMap = {
-            main_text_color: "--smartThemeBodyColor",
-            italics_text_color: "--smartThemeEmColor",
-            underline_text_color: "--smartThemeUnderlineColor",
-            quote_text_color: "--smartThemeQuoteColor",
-            blur_tint_color: "--smartThemeBlurTintColor",
-            chat_tint_color: "--smartThemeChatTintColor",
-            user_mes_blur_tint_color: "--smartThemeUserMesBlurTintColor",
-            bot_mes_blur_tint_color: "--smartThemeBotMesBlurTintColor",
-            shadow_color: "--smartThemeShadowColor",
-            border_color: "--smartThemeBorderColor",
+            main_text_color: "--SmartThemeBodyColor",
+            italics_text_color: "--SmartThemeEmColor",
+            underline_text_color: "--SmartThemeUnderlineColor",
+            quote_text_color: "--SmartThemeQuoteColor",
+            blur_tint_color: "--SmartThemeBlurTintColor",
+            chat_tint_color: "--SmartThemeChatTintColor",
+            user_mes_blur_tint_color: "--SmartThemeUserMesBlurTintColor",
+            bot_mes_blur_tint_color: "--SmartThemeBotMesBlurTintColor",
+            shadow_color: "--SmartThemeShadowColor",
+            border_color: "--SmartThemeBorderColor",
         };
         const vars = Object.entries(colorMap)
             .filter(([k]) => typeof tv[k] === "string" && tv[k].trim())
@@ -1454,19 +1453,32 @@ body.tm-sandbox {
         if (!t) return false;
         if (!force && getPreviewSync(id)) return true;
         if (!force) {
-            const cached = await hydratePreview(id);
-            if (cached) return true;
+            try {
+                const cached = await hydratePreview(id);
+                if (cached) return true;
+            } catch { /* ignore */ }
         }
-        const css = buildActiveCss(t, S().toggles[id]);
-        let $host = $("#tm_autoprev");
-        if (!$host.length) {
-            $host = $("<div>", { id: "tm_autoprev", "aria-hidden": "true" }).css({
-                position: "fixed", left: "-99999px", top: 0, width: 420, height: 800,
-                opacity: 0, pointerEvents: "none", zIndex: -1,
-            }).appendTo("body");
+        const css = (() => {
+            try { return buildActiveCss(t, S().toggles[id]) || t.rawCss || ""; }
+            catch { return t.rawCss || ""; }
+        })();
+        // 1) 立刻用主色渐变占位（不依赖 iframe，Tauri 也稳）
+        let png = "";
+        try { png = gradientPreviewDataUrl(css, 360, 240); }
+        catch { png = ""; }
+        if (png) {
+            try { await setPreview(id, png); } catch { previewMem.set(id, png); }
         }
-        const pm = new PreviewManager($host.empty(), { msgCount: 3, device: "mobile", mode: "mock" });
+        // 2) 后台尝试仿真壳截图覆盖（失败则保留渐变）
         try {
+            let $host = $("#tm_autoprev");
+            if (!$host.length) {
+                $host = $("<div>", { id: "tm_autoprev", "aria-hidden": "true" }).css({
+                    position: "fixed", left: "-99999px", top: 0, width: 420, height: 800,
+                    opacity: 0, pointerEvents: "none", zIndex: -1,
+                }).appendTo("body");
+            }
+            const pm = new PreviewManager($host.empty(), { msgCount: 3, device: "mobile", mode: "mock" });
             pm.mount();
             pm.css = css;
             pm.rebuild();
@@ -1474,25 +1486,22 @@ body.tm-sandbox {
                 const t0 = Date.now();
                 const tick = () => {
                     const doc = pm.$frame?.[0]?.contentDocument;
-                    if ((doc?.body && doc.readyState === "complete") || Date.now() - t0 > 4000) resolve();
-                    else setTimeout(tick, 50);
+                    if ((doc?.body && doc.readyState === "complete") || Date.now() - t0 > 2500) resolve();
+                    else setTimeout(tick, 40);
                 };
                 tick();
             });
-            await new Promise(r => setTimeout(r, 120));
-            let png;
-            try { png = await pm.capturePng(360); }
-            catch { png = gradientPreviewDataUrl(css, 360, 240); }
-            await setPreview(id, png);
-            return true;
-        } catch (e) {
-            console.warn("[美化管理] 预览图生成失败，使用渐变占位：", t?.name, e);
+            await new Promise(r => setTimeout(r, 80));
             try {
-                await setPreview(id, gradientPreviewDataUrl(css, 360, 240));
-                return true;
-            } catch { return false; }
+                const shot = await pm.capturePng(360);
+                if (shot && shot.startsWith("data:image")) await setPreview(id, shot);
+            } catch { /* keep gradient */ }
+            pm.destroy();
+            $host.empty();
+        } catch (e) {
+            console.warn("[美化管理] 预览截图跳过，已用渐变：", t?.name, e);
         }
-        finally { pm.destroy(); $host.empty(); }
+        return !!getPreviewSync(id);
     }
 
     /* ---------- M4 混搭：当前块组合存为新主题 ---------- */
@@ -1529,43 +1538,74 @@ body.tm-sandbox {
         $("#tm_tags").empty().append(
             tags.map(tag => `<button class="tm-chip ${S().tagFilter === tag ? "tm-on" : ""}" data-tag="${esc(tag)}">#${esc(tag)}</button>`).join(""));
     }
+    function fmtTime(ts) {
+        if (!ts) return "—";
+        const d = Date.now() - Number(ts);
+        if (d < 60e3) return "刚刚";
+        if (d < 3600e3) return Math.floor(d / 60e3) + " 分钟前";
+        if (d < 86400e3) return Math.floor(d / 3600e3) + " 小时前";
+        return Math.floor(d / 86400e3) + " 天前";
+    }
     function cardHtml(t) {
+        if (!t || !t.id) return "";
         const active = S().activeIds.includes(t.id);
         const fav = S().favorites.includes(t.id);
-        const kb = (new Blob([t.rawCss]).size / 1024).toFixed(1);
+        const raw = String(t.rawCss || "");
+        const kb = (new Blob([raw]).size / 1024).toFixed(1);
         const tog = S().toggles[t.id] || {};
-        const scopeName = t.kind === "tavern" ? "酒馆原生" : ({ global: "全局", character: "角色", chat: "聊天" }[t.scope] || t.scope);
+        const scopeName = t.kind === "tavern" ? "酒馆原生" : ({ global: "全局", character: "角色", chat: "聊天" }[t.scope] || t.scope || "全局");
+        // 同步保证有图：内存 → 否则即时渐变写入内存
+        let pv = getPreviewSync(t.id);
+        if (!pv) {
+            try {
+                pv = gradientPreviewDataUrl(raw, 360, 240);
+                if (pv) {
+                    previewMem.set(t.id, pv);
+                    setPreview(t.id, pv).catch(() => {});
+                }
+            } catch { pv = ""; }
+        }
+        const blocks = Object.keys(t.blocks || {});
+        const blockChecks = blocks.map(n => {
+            const on = tog[n] !== false;
+            return `<label class="tm-block"><input type="checkbox" data-block="${esc(n)}" ${on ? "checked" : ""}> ${esc(n)}</label>`;
+        }).join(" ");
         return `
 	    <div class="tm-card ${active ? "tm-active" : ""}" data-theme="${t.id}">
 	      <div class="tm-thumb" style="background:${placeholderGradient(t)}">
-	        ${getPreviewSync(t.id) ? `<img src="${getPreviewSync(t.id)}" alt="">` : `<span class="tm-thumb-none">无预览图</span>`}
+	        ${pv ? `<img src="${pv}" alt="">` : `<span class="tm-thumb-none">生成中…</span>`}
 	        <span class="tm-badge tm-badge-scope">${scopeName}</span>
 	        ${active ? `<span class="tm-badge tm-badge-on">● 使用中</span>` : ""}
 	        <button class="tm-fav ${fav ? "tm-on" : ""}" title="收藏">★</button>
 	      </div>
 	      <div class="tm-card-main">
-	        <div class="tm-card-title" title="${esc(t.id)}">${esc(t.name)}</div>
-	        <div class="tm-meta">${esc(t.author)} · ${kb}KB · ${relTime(t.updatedAt)} · 用过 ${S().useCount[t.id] || 0} 次</div>
-	        <div class="tm-tags-row">${t.tags.map(x => `<span class="tm-chip sm" data-tag="${esc(x)}">#${esc(x)}</span>`).join("")}</div>
-	        <div class="tm-blocks">
-	          ${Object.keys(t.blocks).map(b => `<label title="组件块开关（M4）"><input type="checkbox" class="tm-block" data-theme="${t.id}" data-block="${esc(b)}" ${tog[b] !== false ? "checked" : ""}><span>${esc(b)}</span></label>`).join("")}
-	        </div>
+	        <div class="tm-title">${esc(t.name || "未命名")}</div>
+	        <div class="tm-meta">${esc(t.author || "")} · ${kb}KB · ${fmtTime(t.updatedAt)} · 用过 ${S().useCount[t.id] || 0} 次</div>
+	        <div class="tm-tags">${(t.tags || []).map(x => `<span class="tm-chip">#${esc(x)}</span>`).join("")}</div>
+	        <div class="tm-blocks">${blockChecks}</div>
 	        <div class="tm-actions">
-	          <button class="menu_button tm-toggle">${active ? "⏹ 关闭" : "▶ 应用"}</button>
-	          <button class="menu_button tm-edit">✏ 编辑</button>
-	          <button class="menu_button tm-del" title="删除主题">🗑 删除</button>
-	          <button class="menu_button tm-more" title="更多">⋯</button>
+	          <button type="button" class="menu_button tm-toggle">${active ? "停用" : "▶ 应用"}</button>
+	          <button type="button" class="menu_button tm-edit">✎ 编辑</button>
+	          <button type="button" class="menu_button tm-del">🗑 删除</button>
+	          <button type="button" class="menu_button tm-more" title="更多">…</button>
+	          <div class="tm-menu tm-hidden"></div>
 	        </div>
-	        <div class="tm-menu tm-hidden"></div>
 	      </div>
 	    </div>`;
     }
+
     function toggleMoreMenu($btn) {
         const $card = $btn.closest(".tm-card");
-        const $menu = $card.find(".tm-menu");
+        let $menu = $card.find(".tm-menu");
+        if (!$menu.length) {
+            $menu = $('<div class="tm-menu tm-hidden"></div>');
+            $card.find(".tm-actions").append($menu);
+        }
         if (!$menu.hasClass("tm-hidden")) { $menu.addClass("tm-hidden"); return; }
         $(".tm-menu").addClass("tm-hidden");
-        const id = $card.data("theme"), t = S().themes[id];
+        const id = String($card.data("theme") || "");
+        const t = S().themes[id];
+        if (!t) return;
         const hasFix = !!S().mobileFix[id];
         $menu.html(`
 	        <button class="tm-mi" data-act="export">📦 导出（酒馆格式）</button>
@@ -1621,49 +1661,74 @@ body.tm-sandbox {
     /* ---------- M2+M3.1 编辑屏 ---------- */
     const ED = { themeId: null, editor: null, preview: null, built: false, dirty: false, liveTimer: null };
     async function openEditor(themeId) {
-        if (ED.dirty && !confirm("当前编辑有未保存改动，仍要切换主题？")) return;
-        const t = S().themes[themeId]; if (!t) return;
-        ED.themeId = themeId;
-        $("#tm_edit_name").val(t.name);
-        if (!ED.built) {
-            ED.built = true;
-            ED.editor = await createEditor($("#tm_edit_code")[0], {
-                value: "",
-                onChange: v => {
-                    ED.dirty = true;
-                    clearTimeout(ED.liveTimer);
-                    ED.liveTimer = setTimeout(() => ED.preview?.setCss(v), 300);
-                },
-                onSave: () => saveEditor(),
-                onCursor: (css, index) => {
-                    const sels = selectorsAtCursor(css, index);
-                    if (sels.length) ED.preview?.highlightSelectors(sels);
-                },
+        try {
+            if (ED.dirty && !confirm("当前编辑有未保存改动，仍要切换主题？")) return;
+            const id = String(themeId || "");
+            const t = S().themes[id];
+            if (!t) {
+                console.warn("[美化管理] openEditor: 主题不存在", id);
+                window.toastr?.error?.("主题不存在或已删除");
+                return;
+            }
+            ED.themeId = id;
+            $("#tm_edit_name").val(t.name || "");
+            // 先显示编辑屏，避免 CDN 加载时“点了没反应”
+            $("#tm_edit").removeClass("tm-hidden");
+            if (!ED.built || !ED.editor) {
+                ED.built = true;
+                try {
+                    ED.editor = await createEditor($("#tm_edit_code")[0], {
+                        value: "",
+                        onChange: v => {
+                            ED.dirty = true;
+                            clearTimeout(ED.liveTimer);
+                            ED.liveTimer = setTimeout(() => ED.preview?.setCss(v), 300);
+                        },
+                        onSave: () => saveEditor(),
+                        onCursor: (css, index) => {
+                            const sels = selectorsAtCursor(css, index);
+                            if (sels.length) ED.preview?.highlightSelectors(sels);
+                        },
+                    });
+                } catch (e) {
+                    console.error("[美化管理] createEditor 失败", e);
+                    ED.built = false;
+                    ED.editor = null;
+                    window.toastr?.error?.("编辑器初始化失败：" + (e.message || e));
+                    return;
+                }
+                ED.preview = new PreviewManager($("#tm_edit_prev"), {
+                    mode: "pure",
+                    msgCount: 3,
+                    device: "mobile",
+                    onCapture: async () => {
+                        try {
+                            let url;
+                            try { url = await ED.preview.capturePng(360); }
+                            catch { url = gradientPreviewDataUrl(ED.editor.getValue(), 360, 240); }
+                            if (S().themes[ED.themeId]) { await setPreview(ED.themeId, url); renderList(); }
+                            toastr.success("预览图已保存（IndexedDB）");
+                        } catch (e) { toastr.error(e.message || "生成失败"); }
+                    },
+                });
+                ED.preview.mount();
+            }
+            const css = String(t.rawCss || "");
+            ED.editor.setValue(css);
+            ED.dirty = false;
+            if (ED.preview) {
+                ED.preview.css = css;
+                ED.preview.rebuild();
+            }
+            requestAnimationFrame(() => {
+                try { ED.editor.refresh(); } catch { /* */ }
+                try { ED.preview?.relayout(); } catch { /* */ }
             });
-            // 编辑器固定仿真壳（TauriTavern / 欢迎页没有标准聊天 DOM）
-            ED.preview = new PreviewManager($("#tm_edit_prev"), {
-                mode: "pure",
-                msgCount: 3,
-                device: "mobile",
-                onCapture: async () => {
-                    try {
-                        let url;
-                        try { url = await ED.preview.capturePng(360); }
-                        catch { url = gradientPreviewDataUrl(ED.editor.getValue(), 360, 240); }
-                        if (S().themes[ED.themeId]) { await setPreview(ED.themeId, url); renderList(); }
-                        toastr.success("预览图已保存（IndexedDB）");
-                    } catch (e) { toastr.error(e.message || "生成失败"); }
-                },
-            });
-            ED.preview.mount();
+            try { ED.editor.focus(); } catch { /* */ }
+        } catch (e) {
+            console.error("[美化管理] openEditor 异常", e);
+            window.toastr?.error?.("打开编辑失败：" + (e.message || e));
         }
-        ED.editor.setValue(t.rawCss);
-        ED.dirty = false;
-        ED.preview.css = t.rawCss;
-        ED.preview.rebuild(); // 确保仿真壳带上当前 CSS
-        $("#tm_edit").removeClass("tm-hidden");
-        requestAnimationFrame(() => { ED.editor.refresh(); ED.preview.relayout(); });
-        ED.editor.focus();
     }
     function closeEditor() {
         if (ED.dirty && !confirm("有未保存改动，仍要离开编辑器？")) return;
@@ -1765,18 +1830,42 @@ body.tm-sandbox {
         $("#tm_edit_save").on("click", saveEditor);
         $("#tm_edit_format").on("click", () => ED.editor?.format());
         $("#tm_panel")
-            .on("click", ".tm-toggle", function () {
-                const id = $(this).closest(".tm-card").data("theme");
+            .on("click", ".tm-toggle", function (e) {
+                e.preventDefault(); e.stopPropagation();
+                const id = String($(this).closest(".tm-card").data("theme") || "");
+                if (!id) return;
                 S().activeIds.includes(id) ? disableTheme(id) : enableTheme(id);
                 renderList();
             })
-            .on("click", ".tm-edit", function () { openEditor($(this).closest(".tm-card").data("theme")); })
-            .on("click", ".tm-del", function () { deleteTheme($(this).closest(".tm-card").data("theme")); })
-            .on("click", ".tm-more", function () { toggleMoreMenu($(this)); })
-            .on("click", ".tm-fav", function () {
-                const id = $(this).closest(".tm-card").data("theme");
+            .on("click", ".tm-edit", function (e) {
+                e.preventDefault(); e.stopPropagation();
+                const id = String($(this).closest(".tm-card").data("theme") || "");
+                if (!id) return window.toastr?.warning?.("无法识别主题 ID");
+                openEditor(id);
+            })
+            .on("click", ".tm-del", function (e) {
+                e.preventDefault(); e.stopPropagation();
+                const id = String($(this).closest(".tm-card").data("theme") || "");
+                if (id) deleteTheme(id);
+            })
+            .on("click", ".tm-more", function (e) {
+                e.preventDefault(); e.stopPropagation();
+                toggleMoreMenu($(this));
+            })
+            .on("click", ".tm-fav", function (e) {
+                e.preventDefault(); e.stopPropagation();
+                const id = String($(this).closest(".tm-card").data("theme") || "");
+                if (!id) return;
                 S().favorites = S().favorites.includes(id) ? S().favorites.filter(x => x !== id) : [...S().favorites, id];
                 saveSettingsDebounced(); renderList();
+            })
+            .on("change", ".tm-block input[data-block]", function (e) {
+                e.stopPropagation();
+                const id = String($(this).closest(".tm-card").data("theme") || "");
+                const block = $(this).data("block");
+                if (!id || !block) return;
+                setBlockToggle(id, block, !!this.checked);
+                renderList();
             })
             .on("change", ".tm-block", function () {
                 setBlockToggle($(this).data("theme"), $(this).data("block"), this.checked);
@@ -1813,7 +1902,10 @@ body.tm-sandbox {
             else if (e.key === "Escape" && !$("#tm_edit").hasClass("tm-hidden")) closeEditor();
             else if (e.ctrlKey && e.shiftKey && e.code === "KeyB") { e.preventDefault(); togglePanel(); }
         });
-        $(document).on("click", e => { if (!$(e.target).closest(".tm-card").length) $(".tm-menu").addClass("tm-hidden"); });
+        $(document).on("click.tm_dismiss_menu", e => {
+            if ($(e.target).closest(".tm-more, .tm-menu").length) return;
+            $(".tm-menu").addClass("tm-hidden");
+        });
     }
 
     /* ---------- M8 失效哨兵雏形 ---------- */

@@ -109,3 +109,8 @@
   #tm_edit_code, #tm_edit_prev { flex: 1 1 50%; min-height: 40vh; }
   #tm_list[data-view="grid"] { grid-template-columns: 1fr; }
 }
+
+.tm-card { position: relative; }
+.tm-actions { position: relative; display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.tm-menu.tm-hidden { display: none !important; }
+.tm-menu:not(.tm-hidden) { display: flex !important; }
