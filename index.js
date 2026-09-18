@@ -1,19 +1,14 @@
 /**
- * 美化管理 Theme Manager v0.6.0
+ * 美化管理 Theme Manager v0.6.1
  *
- * v0.6.0 主要变更：
- *   1. 接入酒馆原生主题：power-user.js → power_user.themes / applyTheme
- *   2. 启动自动导入酒馆已保存主题 + 后台生成预览图
- *   3. 导入自动识别「酒馆原生 36 字段 / 扩展格式」；导出默认酒馆原生格式
- *   4. 卡片直显删除按钮；已删除的酒馆同步主题不会自动复活
- *   5. 预览器支持 smartTheme* 变量（emo / underline / quote / tint / border / fontScale）
+ * v0.6.1 主要变更：
+ *   1. 修复酒馆主题同步：从 /api/settings/get 的 themes 数组读取（非 power_user.themes）
+ *   2. 不再依赖未导出的 applyTheme；原生主题走 CSS 变量 + custom_css 注入
+ *   3. 预览模板对齐酒馆 DOM / --SmartTheme* 变量，输入区改回真实结构
+ *   4. 预览图改存 IndexedDB，不写入 extension_settings，减轻启动负担
+ *   5. 启动只静默导入主题元数据，不批量生成预览图
  *
- * v0.5.1 修复（针对 "加载失败 [object Event] / Failed to fetch dynamically imported module"）：
- *   1. 酒馆核心模块改为运行时多路径探测导入，自动兼容
- *      /scripts/extensions/<名>/ 与 /scripts/extensions/third-party/<名>/ 两种挂载深度
- *   2. scripts/save-settings.js 在老版本酒馆不存在时，自动回退到 script.js 的导出
- *   3. lib/ 四个文件全部并入本文件 —— 仓库只需要 3 个文件
- *   4. CodeMirror CDN 增加 fastly / npmmirror 备用源；全部失败降级纯文本编辑
+ * v0.6.0 主要变更：接入酒馆原生主题字段、导入导出、删除防复活等
  */
 (async () => {
     /* ================================================================
@@ -48,27 +43,18 @@
         catch {
             saveSettingsDebounced = scriptMod.saveSettingsDebounced; // 老版本从 script.js 导出
         }
-        // ★ power-user.js → power_user.themes（酒馆已存主题）+ applyTheme（原生应用主题）
+        // ★ power-user.js：仅取 power_user（主题列表不在其上；applyTheme 也未导出）
         try {
             const pu = await probe("scripts/power-user.js", { optional: true });
             power_user = pu.power_user ?? null;
-            applyThemeNative = pu.applyTheme ?? null;
+            // applyTheme 在 ST 中为模块私有函数，不可导入；统一走 CSS 注入
+            applyThemeNative = null;
         }
-        catch { /* 拿不到也能跑：应用时走 CSS 变量注入兜底 */ }
-        // ★ 兜底：从后端接口读设置快照（至少保证"自动导入"可用）
-        if (!power_user?.themes) {
-            try {
-                const headers = typeof scriptMod.getRequestHeaders === "function"
-                    ? scriptMod.getRequestHeaders() : { "Content-Type": "application/json" };
-                const res = await fetch("/api/settings/get", { method: "POST", headers });
-                if (res.ok) {
-                    const data = await res.json();
-                    const pu = data?.power_user ?? data?.settings?.power_user;
-                    if (pu?.themes) power_user = pu;   // 快照副本，仅用于同步导入
-                }
-            }
-            catch { /* 忽略 */ }
-        }
+        catch { /* 拿不到也能跑 */ }
+        // 缓存请求头，供后续拉 themes 数组
+        window.__tm_getHeaders = typeof scriptMod.getRequestHeaders === "function"
+            ? () => scriptMod.getRequestHeaders()
+            : () => ({ "Content-Type": "application/json" });
     }
     catch (e) {
         window.toastr?.error?.(`美化管理：酒馆核心模块加载失败（${e.message}）。请按 F12 打开控制台，把 [美化管理] 开头的红色报错截图发给开发者`);
@@ -81,6 +67,19 @@
     if (typeof saveSettingsDebounced !== "function") {
         saveSettingsDebounced = () => console.warn("[美化管理] saveSettingsDebounced 不可用，改动可能不会立即写入磁盘");
     }
+    // 保存前剔除预览图字段，避免 settings.json 膨胀拖慢启动
+    const __tm_save = saveSettingsDebounced;
+    saveSettingsDebounced = function tmSaveSettings() {
+        try {
+            const bag = extension_settings[EXT];
+            if (bag?.themes) {
+                for (const t of Object.values(bag.themes)) {
+                    if (t && "preview" in t) delete t.preview;
+                }
+            }
+        } catch { /* ignore */ }
+        return __tm_save.apply(this, arguments);
+    };
 
     /* ================================================================
      * 工程骨架：数据持久化 + 样式注入层（不碰 power_user.custom_css）
@@ -98,6 +97,98 @@
     function loadSettings() {
         if (!extension_settings[EXT]) extension_settings[EXT] = clone(DEFAULTS);
         for (const k of Object.keys(DEFAULTS)) if (S()[k] === undefined) S()[k] = clone(DEFAULTS[k]);
+        // 轻量：丢弃历史误写入 settings 的大图，并重算 blocks（不持久化重复内容）
+        for (const t of Object.values(S().themes || {})) {
+            if (t && t.preview) delete t.preview;
+            if (t && typeof t.rawCss === "string") t.blocks = parseBlocks(t.rawCss);
+        }
+    }
+
+    /* ---------- 预览图：内存 + IndexedDB（绝不写入 extension_settings） ---------- */
+    const previewMem = new Map();
+    const previewHydrated = new Set(); // 已查过 IDB 的 id，避免 renderList 反复打库
+    const IDB_NAME = "st_theme_manager_previews";
+    const IDB_STORE = "previews";
+    function openPreviewDB() {
+        return new Promise((resolve, reject) => {
+            if (!window.indexedDB) return reject(new Error("no idb"));
+            const req = indexedDB.open(IDB_NAME, 1);
+            req.onupgradeneeded = () => {
+                const db = req.result;
+                if (!db.objectStoreNames.contains(IDB_STORE)) db.createObjectStore(IDB_STORE);
+            };
+            req.onsuccess = () => resolve(req.result);
+            req.onerror = () => reject(req.error || new Error("idb open fail"));
+        });
+    }
+    async function idbGetPreview(id) {
+        try {
+            const db = await openPreviewDB();
+            return await new Promise((resolve, reject) => {
+                const tx = db.transaction(IDB_STORE, "readonly");
+                const r = tx.objectStore(IDB_STORE).get(id);
+                r.onsuccess = () => resolve(r.result || "");
+                r.onerror = () => reject(r.error);
+            });
+        } catch { return ""; }
+    }
+    async function idbSetPreview(id, dataUrl) {
+        try {
+            const db = await openPreviewDB();
+            await new Promise((resolve, reject) => {
+                const tx = db.transaction(IDB_STORE, "readwrite");
+                tx.objectStore(IDB_STORE).put(dataUrl || "", id);
+                tx.oncomplete = () => resolve();
+                tx.onerror = () => reject(tx.error);
+            });
+        } catch (e) { console.warn("[美化管理] IndexedDB 写入预览失败", e); }
+    }
+    async function idbDelPreview(id) {
+        try {
+            const db = await openPreviewDB();
+            await new Promise((resolve, reject) => {
+                const tx = db.transaction(IDB_STORE, "readwrite");
+                tx.objectStore(IDB_STORE).delete(id);
+                tx.oncomplete = () => resolve();
+                tx.onerror = () => reject(tx.error);
+            });
+        } catch { /* ignore */ }
+    }
+    function getPreviewSync(id) { return previewMem.get(id) || ""; }
+    async function hydratePreview(id) {
+        if (previewMem.has(id)) return previewMem.get(id);
+        if (previewHydrated.has(id)) return "";
+        const v = await idbGetPreview(id);
+        previewHydrated.add(id);
+        if (v) previewMem.set(id, v);
+        return v || "";
+    }
+    async function setPreview(id, dataUrl) {
+        previewHydrated.add(id);
+        if (dataUrl) previewMem.set(id, dataUrl); else previewMem.delete(id);
+        if (dataUrl) await idbSetPreview(id, dataUrl); else await idbDelPreview(id);
+    }
+
+    /* ---------- 酒馆主题列表：API themes[]（非 power_user.themes） ---------- */
+    let tavernThemesCache = null; // { list: Theme[], fetchedAt }
+    async function fetchTavernThemeList({ force = false } = {}) {
+        if (!force && tavernThemesCache && Date.now() - tavernThemesCache.fetchedAt < 30_000) {
+            return tavernThemesCache.list;
+        }
+        const headers = (typeof window.__tm_getHeaders === "function")
+            ? window.__tm_getHeaders()
+            : { "Content-Type": "application/json" };
+        const res = await fetch("/api/settings/get", { method: "POST", headers });
+        if (!res.ok) throw new Error(`settings/get HTTP ${res.status}`);
+        const data = await res.json();
+        const list = Array.isArray(data?.themes) ? data.themes : [];
+        tavernThemesCache = { list, fetchedAt: Date.now() };
+        // 顺带刷新当前 custom_css 引用（只读，不写回）
+        const pu = data?.settings?.power_user;
+        if (pu && power_user && typeof pu.custom_css === "string") {
+            /* 不覆盖整个 power_user，避免干扰运行时 */
+        }
+        return list;
     }
     function applyTheme(theme) {
         const css = [
@@ -133,22 +224,20 @@
         const t = S().themes[id];
         S().activeIds = S().activeIds.filter(x => x !== id);
         saveSettingsDebounced(); refreshAll();
-        // 酒馆原生主题：恢复启用前的酒馆主题
-        if (t?.kind === "tavern" && power_user && typeof applyThemeNative === "function") {
-            try { if (power_user.theme === t.name) applyThemeNative(S().tavernPrevTheme || "Default", { notify: false }); }
-            catch (e) { console.warn("[美化管理] 恢复酒馆主题失败", e); }
-        }
+        // 酒馆原生主题关闭时仅移除本扩展注入的 style；不调用未导出的 applyTheme
+        // 用户可在酒馆「界面主题」手动切回原主题
     }
-    // 优先调用酒馆原生 applyTheme（保真），不可用/失败时由 refreshAll 的 CSS 变量注入兜底
+    // 酒馆原生主题：不调用未导出的 applyTheme，仅记录名称；样式由 applyTheme()/refreshAll 注入
     function applyTavernNative(id) {
         const t = S().themes[id];
-        if (!t || t.kind !== "tavern" || !power_user || typeof applyThemeNative !== "function") return;
+        if (!t || t.kind !== "tavern") return;
         try {
-            if (typeof power_user.theme === "string" && power_user.theme !== t.name) S().tavernPrevTheme = power_user.theme;
-            if (!power_user.themes) power_user.themes = {};
-            if (!power_user.themes[t.name]) power_user.themes[t.name] = { ...t.tavern, name: t.name };
-            applyThemeNative(t.name, { notify: false });
-        } catch (e) { console.warn("[美化管理] 原生 applyTheme 失败，已用 CSS 变量注入兜底", e); }
+            if (power_user && typeof power_user.theme === "string" && power_user.theme !== t.name) {
+                S().tavernPrevTheme = power_user.theme;
+            }
+            // 可选：同步当前显示名到 power_user.theme（不触发官方全量 apply，避免副作用）
+            // 真实配色已通过 tavernToCss → <style data-theme-id> 注入
+        } catch (e) { console.warn("[美化管理] applyTavernNative", e); }
     }
     // 删除主题（卡片删除按钮与 ⋯ 菜单共用）
     function deleteTheme(id) {
@@ -157,6 +246,7 @@
         disableTheme(id);
         delete S().themes[id]; delete S().toggles[id]; delete S().mobileFix[id];
         S().favorites = S().favorites.filter(x => x !== id);
+        setPreview(id, ""); // 清内存 + IndexedDB，不碰 settings 体积
         // 从酒馆同步来的主题：记住已删名字，避免下次自动同步"复活"（手动导入同名文件可解除）
         if (t.kind === "tavern" || (Array.isArray(t.tags) && t.tags.includes("酒馆"))) {
             S().tavernDeleted = [...new Set([...(S().tavernDeleted || []), t.name])];
@@ -330,39 +420,47 @@
     const BASE_CSS = `
 	*{box-sizing:border-box} html,body{height:100%;margin:0}
 	body{display:flex;flex-direction:column;font:15px/1.65 system-ui,"Segoe UI","Microsoft YaHei",sans-serif;
-	  background:var(--smartThemeBlurTintColor,var(--theme-bg,#181825));
-	  color:var(--smartThemeBodyColor,var(--text,#e6e6ef));
-	  font-size:calc(15px * var(--smartThemeFontScale,1))}
-	#top-bar{display:flex;justify-content:space-between;align-items:center;padding:8px 12px;background:rgba(0,0,0,.28);font-size:16px}
+	  background:var(--SmartThemeBlurTintColor,#181825);
+	  color:var(--SmartThemeBodyColor,#e6e6ef);
+	  font-size:calc(15px * var(--SmartThemeFontScale,1))}
+	#top-bar{display:flex;justify-content:space-between;align-items:center;padding:8px 12px;
+	  background:rgba(0,0,0,.28);border-bottom:1px solid var(--SmartThemeBorderColor,rgba(255,255,255,.08));font-size:14px}
 	#site-logo{font-size:13px;opacity:.75;letter-spacing:.5px}
-	#top-bar-icons span{margin-left:10px;cursor:pointer}
-	#sheld{flex:1;display:flex;min-height:0}
-	#chat{flex:1;overflow-y:auto;padding:14px;display:flex;flex-direction:column;gap:12px;scrollbar-width:thin}
-	.mes{position:relative;border:1px solid var(--smartThemeBorderColor,transparent)}
-	.mes_block::after{content:"";display:block;clear:both}
-	.ch_name{display:flex;justify-content:space-between;align-items:center;font-weight:600;font-size:.92em;color:var(--smartThemeQuoteColor,var(--accent,#9ab3ff))}
+	#top-bar-icons span{margin-left:10px;cursor:default;opacity:.7}
+	#sheld{flex:1;display:flex;flex-direction:column;min-height:0;width:100%}
+	#chat{flex:1;overflow-y:auto;padding:10px 12px;display:flex;flex-direction:column;gap:10px;
+	  scrollbar-width:thin;background:var(--SmartThemeChatTintColor,transparent)}
+	.mes{position:relative;display:flex;flex-direction:row;align-items:flex-start;gap:8px;
+	  border:1px solid var(--SmartThemeBorderColor,transparent);border-radius:10px;padding:6px 8px}
+	.mes.is_user{align-self:stretch}
+	.mes_block{display:flex;flex-direction:column;gap:4px;flex:1 1 auto;min-width:0}
+	.ch_name{display:flex;justify-content:space-between;align-items:center;
+	  font-weight:600;font-size:.9em;color:var(--SmartThemeQuoteColor,#9ab3ff)}
 	.mes.is_user .name_text{color:#7bd88f}
-	.mes_buttons{display:flex;gap:8px;opacity:.45;font-size:.9em}
-	.swipe_left,.swipe_right{position:absolute;top:0;bottom:0;display:none;align-items:center;cursor:pointer;opacity:.35}
-	.swipe_left{left:2px}.swipe_right{right:2px}
-	.mesAvatarWrapper{float:left;width:56px;margin:2px 10px 4px 0}
-	.avatar img{width:100%;display:block;border-radius:8px}
-	.mes_text{padding:9px 12px;border-radius:12px;white-space:pre-wrap;word-break:break-word;overflow:hidden;
-	  background:var(--smartThemeChatTintColor,rgba(255,255,255,.05));
-	  border:1px solid var(--smartThemeBorderColor,transparent)}
-	.mes.is_user .mes_text{background:var(--smartThemeUserMesBlurTintColor,var(--smartThemeChatTintColor,rgba(255,255,255,.07)))}
-	.mes:not(.is_user) .mes_text{background:var(--smartThemeBotMesBlurTintColor,var(--smartThemeChatTintColor,rgba(255,255,255,.05)))}
-	.mes_text em{color:var(--smartThemeEmColor,inherit);font-style:italic}
-	.mes_text u{color:var(--smartThemeUnderlineColor,inherit);text-decoration:underline}
-	.mes_text q{color:var(--smartThemeQuoteColor,#f2c078)}
-	#form_sheld{border-top:1px solid var(--smartThemeBorderColor,rgba(255,255,255,.12));background:var(--smartThemeBlurTintColor,rgba(0,0,0,.22))}
-	#form_sheld_form{display:flex;align-items:flex-end;gap:8px;padding:10px}
-	#options_button{width:36px;height:36px;display:grid;place-items:center;cursor:pointer;border-radius:8px}
-	#send_textarea{flex:1;min-height:36px;max-height:140px;overflow-y:auto;padding:8px 12px;border-radius:10px;
+	.mes_buttons{display:flex;gap:8px;opacity:.4;font-size:.85em}
+	.swipe_left,.swipe_right{display:none}
+	.mesAvatarWrapper{flex:0 0 auto;width:48px;height:48px}
+	.avatar{width:48px;height:48px;border-radius:8px;overflow:hidden}
+	.avatar img{width:100%;height:100%;object-fit:cover;display:block;border-radius:8px}
+	.mes_text{padding:8px 12px;border-radius:12px;white-space:pre-wrap;word-break:break-word;
+	  background:var(--SmartThemeBotMesBlurTintColor,rgba(255,255,255,.05));
+	  border:1px solid var(--SmartThemeBorderColor,transparent);color:var(--SmartThemeBodyColor,inherit)}
+	.mes.is_user .mes_text{background:var(--SmartThemeUserMesBlurTintColor,rgba(255,255,255,.08))}
+	.mes_text em{color:var(--SmartThemeEmColor,inherit);font-style:italic}
+	.mes_text u{color:var(--SmartThemeUnderlineColor,inherit);text-decoration:underline}
+	.mes_text q{color:var(--SmartThemeQuoteColor,#f2c078)}
+	#form_sheld{border-top:1px solid var(--SmartThemeBorderColor,rgba(255,255,255,.12));
+	  background:var(--SmartThemeBlurTintColor,rgba(0,0,0,.22));flex-shrink:0}
+	#send_form{display:flex;align-items:flex-end;gap:8px;padding:10px}
+	#leftSendForm{display:flex;align-items:center}
+	#options_button{width:36px;height:36px;display:grid;place-items:center;cursor:default;border-radius:8px;opacity:.7}
+	#send_textarea{flex:1;min-height:38px;max-height:120px;resize:none;padding:8px 12px;border-radius:10px;
+	  border:1px solid var(--SmartThemeBorderColor,rgba(255,255,255,.12));
 	  background:rgba(255,255,255,.06);outline:none;font:inherit;color:inherit}
-	#send_textarea:empty::before{content:"在此输入消息…";opacity:.45}
-	#rightSendForm{display:flex;gap:6px}
-	#send_but{width:38px;height:38px;display:grid;place-items:center;border-radius:50%;cursor:pointer;background:var(--accent,#5b6ee1);color:#fff}
+	#send_textarea::placeholder{opacity:.45}
+	#rightSendForm{display:flex;gap:6px;align-items:center}
+	#send_but{width:40px;height:40px;display:grid;place-items:center;border-radius:50%;
+	  background:var(--SmartThemeQuoteColor,#5b6ee1);color:#fff;font-size:16px}
 	#mes_stop{display:none}
 	.tm-hint{text-align:center;font-size:11px;opacity:.4;padding:6px 0 2px}
 	`;
@@ -372,12 +470,11 @@
             const [who, text, name] = CHAT[i % CHAT.length];
             const isUser = who === "user";
             msgs.push(
-`<div class="mes ${isUser ? "is_user" : ""}${i === 0 ? " first_mes" : ""}${i === msgCount - 1 ? " last_mes" : ""}" mesid="${i}">
-	<div class="swipe_left">‹</div><div class="swipe_right">›</div>
+`<div class="mes ${isUser ? "is_user" : ""}${i === 0 ? " first_mes" : ""}${i === msgCount - 1 ? " last_mes" : ""}" mesid="${i}" is_user="${isUser}" ch_name="${isUser ? "你" : name}">
+	<div class="mesAvatarWrapper"><div class="avatar"><img src="${isUser ? AV_USER : AV_CHAR}" alt=""></div></div>
 	<div class="mes_block">
 	<div class="ch_name"><span class="name_text">${isUser ? "你" : name}</span>
 	<div class="mes_buttons"><span class="mes_button mes_edit" title="编辑">✏️</span><span class="mes_button mes_copy" title="复制">⧉</span></div></div>
-	<div class="mesAvatarWrapper"><div class="avatar"><img src="${isUser ? AV_USER : AV_CHAR}" alt=""></div></div>
 	<div class="mes_text">${text}</div>
 	</div>
 	</div>`);
@@ -400,16 +497,14 @@
 	<div class="tm-hint">— 模拟对话（${msgCount} 条）· 一切以真实应用为准 —</div>
 	</div></div>
 	<div id="form_sheld">
-	<form id="form_sheld_form">
-	<div id="nonQRFormItems">
+	<div id="send_form">
 	<div id="leftSendForm"><div id="options_button" title="选项">☰</div></div>
-	<div id="send_textarea" contenteditable="true"></div>
-	</div>
+	<textarea id="send_textarea" placeholder="在此输入消息…" rows="1" readonly></textarea>
 	<div id="rightSendForm">
 	<div id="mes_stop" title="停止">■</div>
 	<div id="send_but" title="发送">➤</div>
 	</div>
-	</form>
+	</div>
 	</div>
 	</body></html>`;
     }
@@ -727,7 +822,12 @@
         const id = `${String(name).trim().replace(/\s+/g, "-").toLowerCase()}-${Date.now().toString(36)}`;
         return { id, name: String(name).trim(), author, version, tags, scope, kind: "css", rawCss: css, blocks: parseBlocks(css), updatedAt: Date.now(), preview: "" };
     }
-    function addTheme(t) { S().themes[t.id] = t; saveSettingsDebounced(); return t; }
+    function addTheme(t) {
+        if (t) delete t.preview; // 预览只进 IndexedDB
+        S().themes[t.id] = t;
+        saveSettingsDebounced();
+        return t;
+    }
     function placeholderGradient(t) {
         const cols = [...String(t.rawCss).matchAll(/#[0-9a-fA-F]{3,8}\b|rgba?\([^)]+\)/g)].map(m => m[0]).slice(0, 2);
         const h = [...t.id].reduce((a, c) => a + c.charCodeAt(0), 0);
@@ -767,7 +867,7 @@
     function exportThemeExt(id) {
         const t = S().themes[id]; if (!t) return;
         const data = { name: t.name, author: t.author, version: t.version, tags: t.tags, scope: t.scope, kind: t.kind, css: t.rawCss };
-        if (t.preview) data.preview = t.preview;
+        const pv = getPreviewSync(t.id); if (pv) data.preview = pv;
         if (t.tavern) data.tavern = t.tavern;
         downloadJson(`${safeFileName(t.name)}.theme.json`, data);
         toastr.success(`已导出（扩展格式）：${t.name}.theme.json`);
@@ -787,46 +887,68 @@
                 t = createTheme({ name: o.name, css: o.css, author: o.author || "unknown",
                     tags: Array.isArray(o.tags) ? o.tags : [], scope: o.scope || "global", version: o.version || "1.0.0" });
                 if (o.tavern && isTavernTheme(o.tavern)) { t.kind = "tavern"; t.tavern = normalizeTavern(o.tavern); }
-                t.preview = typeof o.preview === "string" && o.preview.startsWith("data:image") ? o.preview : "";
+                delete t.preview;
             }
             else throw new Error("无法识别的格式：需要酒馆主题 JSON（含 main_text_color / blur_tint_color 等字段）或扩展格式（name + css）");
             if (t.kind === "tavern") S().tavernDeleted = (S().tavernDeleted || []).filter(n => n !== t.name);
+            delete t.preview;
             addTheme(t); renderList();
-            generatePreview(t.id).then(ok => { if (ok) renderList(); });   // 自动生成预览
+            const importedPv = (typeof o.preview === "string" && o.preview.startsWith("data:image")) ? o.preview : "";
+            if (importedPv) setPreview(t.id, importedPv).then(() => renderList());
+            else generatePreview(t.id).then(ok => { if (ok) renderList(); });
         } catch (e) { toastr.error(`导入失败：${e.message}`); }
     }
 
     /* ---------- M10.1 自动导入酒馆主题 + 自动生成预览 ---------- */
     async function syncTavernThemes({ manual = false } = {}) {
-        const src = power_user?.themes;
-        if (!src || typeof src !== "object") {
-            if (manual) toastr.warning("未检测到酒馆主题数据，无法同步");
+        let list = [];
+        try {
+            list = await fetchTavernThemeList({ force: manual });
+        } catch (e) {
+            console.warn("[美化管理] 拉取酒馆 themes 失败", e);
+            if (manual) toastr.warning("无法从酒馆读取主题列表（/api/settings/get）");
+            return [];
+        }
+        if (!Array.isArray(list) || !list.length) {
+            if (manual) toastr.warning("酒馆主题列表为空");
             return [];
         }
         const existing = new Set(Object.values(S().themes).filter(t => t.kind === "tavern").map(t => t.name));
         const tomb = new Set(S().tavernDeleted || []);
         const added = [];
-        for (const [key, tv] of Object.entries(src)) {
+        for (const tv of list) {
             if (!tv || typeof tv !== "object") continue;
-            const name = (typeof tv.name === "string" && tv.name.trim()) ? tv.name.trim() : key;
-            if (existing.has(name) || tomb.has(name)) continue;
+            const name = (typeof tv.name === "string" && tv.name.trim()) ? tv.name.trim() : "";
+            if (!name || existing.has(name) || tomb.has(name)) continue;
+            // 只存规范化后的 36 字段 + 派生 CSS，不含预览图
             const t = createTavernTheme({ ...tv, name });
-            addTheme(t); added.push(t.id);
-        }
-        // 顺带把酒馆"当前生效的自定义 CSS"快照存成一条主题（一次性）
-        const liveCss = typeof power_user?.custom_css === "string" ? power_user.custom_css.trim() : "";
-        if (liveCss && !tomb.has("当前酒馆自定义CSS") && !Object.values(S().themes).some(t => t.name === "当前酒馆自定义CSS")) {
-            const t = addTheme(createTheme({ name: "当前酒馆自定义CSS", css: liveCss, author: "SillyTavern", tags: ["酒馆"] }));
+            // 确保 settings 里没有 preview 字段
+            delete t.preview;
+            addTheme(t);
             added.push(t.id);
         }
+        // 可选：把当前 custom_css 快照成一条（仅手动同步时，避免启动膨胀）
+        if (manual) {
+            const liveCss = typeof power_user?.custom_css === "string" ? power_user.custom_css.trim() : "";
+            if (liveCss && !tomb.has("当前酒馆自定义CSS") && !Object.values(S().themes).some(t => t.name === "当前酒馆自定义CSS")) {
+                const t = addTheme(createTheme({ name: "当前酒馆自定义CSS", css: liveCss, author: "SillyTavern", tags: ["酒馆"] }));
+                delete t.preview;
+                added.push(t.id);
+            }
+        }
         if (added.length) { saveSettingsDebounced(); renderList(); }
-        if (manual) toastr.info(added.length ? `已从酒馆导入 ${added.length} 个主题` : "没有新的酒馆主题需要导入");
+        if (manual) toastr.info(added.length ? `已从酒馆导入 ${added.length} 个主题（预览按需生成）` : "没有新的酒馆主题需要导入");
         return added;
     }
     // 后台静默生成预览图：离屏复用预览器 → 截图入库
     async function generatePreview(id, { force = false } = {}) {
         const t = S().themes[id];
-        if (!t || (t.preview && !force)) return false;
+        if (!t) return false;
+        if (!force && getPreviewSync(id)) return true;
+        if (!force) {
+            const cached = await hydratePreview(id);
+            if (cached) return true;
+        }
         let $host = $("#tm_autoprev");
         if (!$host.length) {
             $host = $("<div>", { id: "tm_autoprev", "aria-hidden": "true" }).css({
@@ -839,7 +961,7 @@
             pm.mount();
             pm.css = buildActiveCss(t, S().toggles[id]);
             pm.rebuild();
-            await new Promise(resolve => {                 // 等 iframe 加载完
+            await new Promise(resolve => {
                 const t0 = Date.now();
                 const tick = () => {
                     const doc = pm.$frame?.[0]?.contentDocument;
@@ -848,9 +970,10 @@
                 };
                 tick();
             });
-            await new Promise(r => setTimeout(r, 150));    // 留渲染时间
-            const png = await pm.capturePng(480);
-            if (S().themes[id]) { S().themes[id].preview = png; saveSettingsDebounced(); }
+            await new Promise(r => setTimeout(r, 150));
+            // 限制尺寸，避免 dataURL 过大
+            const png = await pm.capturePng(360);
+            await setPreview(id, png); // 只写 IndexedDB + 内存，不碰 settings
             return true;
         } catch (e) { console.warn("[美化管理] 预览图生成失败：", t?.name, e); return false; }
         finally { pm.destroy(); $host.empty(); }
@@ -899,7 +1022,7 @@
         return `
 	    <div class="tm-card ${active ? "tm-active" : ""}" data-theme="${t.id}">
 	      <div class="tm-thumb" style="background:${placeholderGradient(t)}">
-	        ${t.preview ? `<img src="${t.preview}" alt="">` : `<span class="tm-thumb-none">无预览图</span>`}
+	        ${getPreviewSync(t.id) ? `<img src="${getPreviewSync(t.id)}" alt="">` : `<span class="tm-thumb-none">无预览图</span>`}
 	        <span class="tm-badge tm-badge-scope">${scopeName}</span>
 	        ${active ? `<span class="tm-badge tm-badge-on">● 使用中</span>` : ""}
 	        <button class="tm-fav ${fav ? "tm-on" : ""}" title="收藏">★</button>
@@ -931,8 +1054,8 @@
         $menu.html(`
 	        <button class="tm-mi" data-act="export">📦 导出（酒馆格式）</button>
 	        <button class="tm-mi" data-act="exportExt">🧩 导出（扩展格式）</button>
-	        <button class="tm-mi" data-act="pvgen">🖼 ${t.preview ? "重新生成预览图" : "生成预览图"}</button>
-	        ${t.preview ? `<button class="tm-mi" data-act="pvd">🧹 删除预览图</button>` : ""}
+	        <button class="tm-mi" data-act="pvgen">🖼 ${getPreviewSync(t.id) ? "重新生成预览图" : "生成预览图"}</button>
+	        ${getPreviewSync(t.id) ? `<button class="tm-mi" data-act="pvd">🧹 删除预览图</button>` : ""}
 	        <button class="tm-mi" data-act="dup">⧉ 复制一份</button>
 	        <button class="tm-mi" data-act="audit">📱 移动端体检</button>
 	        <button class="tm-mi" data-act="fix">${hasFix ? "♻ 重新生成移动修复" : "🩹 一键移动修复"}</button>
@@ -965,6 +1088,12 @@
         else for (const t of arr) $list.append(cardHtml(t));
         $list.scrollTop(st);
         renderQuickSwitch();
+        // 异步从 IndexedDB 补齐预览（不阻塞、不写 settings）
+        Promise.all(arr.map(async t => {
+            if (getPreviewSync(t.id)) return false;
+            const v = await hydratePreview(t.id);
+            return !!v;
+        })).then(flags => { if (flags.some(Boolean)) renderList(); });
     }
 
     /* ---------- M2+M3.1 编辑屏 ---------- */
@@ -988,8 +1117,8 @@
             ED.preview = new PreviewManager($("#tm_edit_prev"), {
                 onCapture: async () => {
                     try {
-                        const url = await ED.preview.capturePng();
-                        if (S().themes[ED.themeId]) { S().themes[ED.themeId].preview = url; saveSettingsDebounced(); renderList(); }
+                        const url = await ED.preview.capturePng(360);
+                        if (S().themes[ED.themeId]) { await setPreview(ED.themeId, url); renderList(); }
                         toastr.success("预览图已生成并保存到主题");
                     } catch (e) { toastr.error(e.message); }
                 },
@@ -1082,7 +1211,8 @@
         $("#tm_disable_all").on("click", () => { [...S().activeIds].forEach(id => disableTheme(id)); renderList(); });
         $("#tm_sync").on("click", async () => {
             const ids = await syncTavernThemes({ manual: true });
-            if (ids.length) { for (const id of ids) await generatePreview(id); renderList(); }
+            // 不批量生成预览，避免卡顿；用户可在卡片菜单按需生成
+            if (ids.length) renderList();
         });
         $("#tm_import").on("click", () => $("#tm_file").trigger("click"));
         $("#tm_file").on("change", e => { [...e.target.files].forEach(importFromFile); e.target.value = ""; });
@@ -1141,7 +1271,7 @@
                     case "audit": showReport(`📱 移动端体检 · ${t.name}`, auditMobile(buildActiveCss(t, S().toggles[id]))); break;
                     case "fix": S().mobileFix[id] = { enabled: true, css: buildMobileFix() }; saveSettingsDebounced(); refreshAll(); toastr.success("mobile-fix 独立层已生成并启用"); break;
                     case "fixdel": delete S().mobileFix[id]; saveSettingsDebounced(); refreshAll(); toastr.info("移动修复层已删除"); break;
-                    case "pvd": t.preview = ""; saveSettingsDebounced(); renderList(); break;
+                    case "pvd": setPreview(id, "").then(() => renderList()); break;
                     case "del": deleteTheme(id); break;
                 }
             });
@@ -1170,13 +1300,12 @@
         refreshAll();
         if (event_types?.CHAT_CHANGED) eventSource.on(event_types.CHAT_CHANGED, () => { refreshAll(); sentinel(); });
         if (event_types?.CHARACTER_MESSAGE_RENDERED) eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, sentinel);
-        // 自动导入酒馆已有主题并生成预览（只处理新增、不阻塞界面）
+        // 启动仅静默导入主题元数据（不生成预览、不阻塞）
         (async () => {
             try {
                 const ids = await syncTavernThemes({ manual: false });
                 if (ids.length) {
-                    toastr.info(`已自动导入酒馆原有主题 ${ids.length} 个，正在后台生成预览图…`);
-                    for (const id of ids) await generatePreview(id);
+                    console.info(`[美化管理] 已自动导入酒馆主题 ${ids.length} 个（预览按需生成）`);
                     renderList();
                 }
             } catch (e) { console.warn("[美化管理] 酒馆主题自动导入失败", e); }
