@@ -1,10 +1,6 @@
 /**
- * 美化管理 Theme Manager v0.7.3（推倒重建）
- *
- * 工程骨架 + M1 库 + M2 真实页面实时预览 + 光标高亮 + M3.1 代码编辑
- * + M4 块开关 + M7 导入导出 + M9 移动体检 + 酒馆同步
- *
- * 原则：独立 style[data-theme-id]；预览图只进 IDB；编辑=真实页面注入
+ * 美化管理 Theme Manager v0.7.4
+ * 真实页面实时预览 + 光标/点击双向定位 + 酒馆同步/应用修复
  */
 (async () => {
     const PREFIXES = ["../../../../", "../../../", "/", "../../../../../../"];
@@ -35,7 +31,7 @@
     if (typeof saveSettingsDebounced !== "function") saveSettingsDebounced = () => {};
 
     const EXT = "st_theme_manager";
-    const ED = { themeId: null, editor: null, preview: null, built: false, dirty: false, liveTimer: null };
+    const ED = { themeId: null, editor: null, built: false, dirty: false, liveTimer: null };
     const DEFAULTS = {
         enabled: true, themes: {}, activeIds: [], toggles: {}, mobileFix: {},
         viewMode: "grid", favorites: [], lastUsedAt: {}, useCount: {},
@@ -203,7 +199,7 @@
             layout.push(`#chat { font-size: calc(1em * ${tv.font_scale}) !important; }`);
         if (typeof tv.chat_width === "number")
             layout.push(`#chat { width: ${tv.chat_width}% !important; max-width: 100% !important; }`);
-        const parts = [`/* @theme-block: tavern-colors */\n:root {\n${vars}\n}`];
+        const parts = [`/* @theme-block: tavern-colors */\n:root, html, body {\n${vars}\n}`];
         if (layout.length) parts.push(`/* @theme-block: tavern-layout */\n${layout.join("\n")}`);
         const custom = String(tv.custom_css || "").trim();
         if (custom) parts.push(`/* @theme-block: tavern-custom */\n${custom}`);
@@ -219,15 +215,34 @@
         const tv = normalizeTavern(); tv.name = t.name; tv.custom_css = String(t.rawCss || ""); return tv;
     }
 
+    function ensureStyleTag(id) {
+        let el = document.getElementById(id);
+        if (!el) {
+            el = document.createElement("style");
+            el.id = id;
+            (document.body || document.head).appendChild(el);
+        } else if (document.body && el.parentElement !== document.body) {
+            document.body.appendChild(el);
+        }
+        return el;
+    }
     function applyTheme(theme) {
-        const css = [buildActiveCss(theme, S().toggles[theme.id]),
-            S().mobileFix[theme.id]?.enabled ? S().mobileFix[theme.id].css : ""].filter(Boolean).join("\n");
-        let el = document.head.querySelector(`style[data-theme-id="${CSS.escape(theme.id)}"]`);
-        if (!el) { el = document.createElement("style"); el.setAttribute("data-theme-id", theme.id); document.head.appendChild(el); }
+        if (!theme) return;
+        const css = [
+            buildActiveCss(theme, S().toggles[theme.id]),
+            S().mobileFix[theme.id]?.enabled ? S().mobileFix[theme.id].css : "",
+        ].filter(Boolean).join("\n");
+        let el = document.querySelector(`style[data-theme-id="${CSS.escape(theme.id)}"]`);
+        if (!el) {
+            el = document.createElement("style");
+            el.setAttribute("data-theme-id", theme.id);
+            (document.body || document.head).appendChild(el);
+        }
         el.textContent = css;
+        if (document.body) document.body.appendChild(el);
     }
     function refreshAll() {
-        document.head.querySelectorAll("style[data-theme-id]").forEach(el => {
+        document.querySelectorAll("style[data-theme-id]").forEach(el => {
             if (!S().activeIds.includes(el.getAttribute("data-theme-id"))) el.remove();
         });
         S().activeIds = S().activeIds.filter(id => S().themes[id]);
@@ -238,11 +253,10 @@
         }
     }
     function setLivePreviewCss(css) {
-        let el = document.getElementById("tm_live_preview");
-        if (!el) { el = document.createElement("style"); el.id = "tm_live_preview"; document.head.appendChild(el); }
+        const el = ensureStyleTag("tm_live_preview");
         el.textContent = String(css || "");
         if (ED.themeId) {
-            try { document.head.querySelector(`style[data-theme-id="${CSS.escape(ED.themeId)}"]`)?.remove(); } catch {}
+            try { document.querySelector(`style[data-theme-id="${CSS.escape(ED.themeId)}"]`)?.remove(); } catch {}
         }
     }
     function clearLivePreview() { document.getElementById("tm_live_preview")?.remove(); }
@@ -256,7 +270,14 @@
         if (!S().activeIds.includes(id)) S().activeIds.push(id);
         S().lastUsedAt[id] = Date.now();
         S().useCount[id] = (S().useCount[id] || 0) + 1;
-        saveSettingsDebounced(); refreshAll();
+        saveSettingsDebounced();
+        refreshAll();
+        try { if (power_user && t.name) power_user.theme = t.name; } catch {}
+        try {
+            const el = document.querySelector(`style[data-theme-id="${CSS.escape(id)}"]`);
+            if (el && document.body) document.body.appendChild(el);
+        } catch {}
+        toastr?.success?.(`已应用「${t.name}」（扩展层覆盖页面样式）`);
     }
     function disableTheme(id) {
         S().activeIds = S().activeIds.filter(x => x !== id);
@@ -283,12 +304,25 @@
         if (!force && tavernCache && Date.now() - tavernCache.at < 30000) return tavernCache.list;
         const headers = typeof window.__tm_getHeaders === "function"
             ? window.__tm_getHeaders() : { "Content-Type": "application/json" };
-        const res = await fetch("/api/settings/get", { method: "POST", headers });
-        if (!res.ok) throw new Error(`settings/get HTTP ${res.status}`);
-        const data = await res.json();
-        const list = Array.isArray(data?.themes) ? data.themes : [];
-        tavernCache = { list, at: Date.now() };
-        return list;
+        let list = [];
+        try {
+            const res = await fetch("/api/settings/get", { method: "POST", headers });
+            if (res.ok) {
+                const data = await res.json();
+                if (Array.isArray(data?.themes)) list = data.themes;
+                else if (Array.isArray(data?.settings?.themes)) list = data.settings.themes;
+                else if (Array.isArray(data?.power_user?.themes)) list = data.power_user.themes;
+            }
+        } catch (e) { console.warn("[美化管理] settings/get 失败", e); }
+        if (!list.length) {
+            try {
+                if (Array.isArray(power_user?.themes)) list = power_user.themes;
+                else if (power_user?.themes && typeof power_user.themes === "object")
+                    list = Object.values(power_user.themes);
+            } catch {}
+        }
+        tavernCache = { list: list || [], at: Date.now() };
+        return tavernCache.list;
     }
     async function syncTavernThemes({ manual = false } = {}) {
         let list = [];
@@ -298,7 +332,6 @@
             if (manual) toastr.warning("无法读取酒馆主题列表");
             return [];
         }
-        if (!list.length) { if (manual) toastr.warning("酒馆主题列表为空"); return []; }
         const existing = new Set(Object.values(S().themes).filter(t => t.kind === "tavern").map(t => t.name));
         const tomb = new Set(S().tavernDeleted || []);
         const added = [];
@@ -306,11 +339,24 @@
             if (!tv || typeof tv !== "object") continue;
             const name = typeof tv.name === "string" ? tv.name.trim() : "";
             if (!name || existing.has(name) || tomb.has(name)) continue;
+            if (!isTavernTheme({ ...tv, name }) && typeof tv.custom_css !== "string") continue;
             const t = createTavernTheme({ ...tv, name });
             delete t.preview; addTheme(t); added.push(t.id);
         }
+        if (manual) {
+            let liveCss = "";
+            try { liveCss = String(power_user?.custom_css || "").trim(); } catch {}
+            if (liveCss && !Object.values(S().themes).some(t => t.name === "当前酒馆自定义CSS")) {
+                const t = addTheme(createTheme({ name: "当前酒馆自定义CSS", css: liveCss, author: "SillyTavern", tags: ["酒馆", "当前"] }));
+                added.push(t.id);
+            }
+        }
         if (added.length) { saveSettingsDebounced(); renderList(); }
-        if (manual) toastr.info(added.length ? `已导入 ${added.length} 个酒馆主题` : "没有新的酒馆主题");
+        if (manual) {
+            toastr.info(added.length
+                ? `已同步 ${added.length} 项`
+                : (list.length ? "没有新项（可能已全部导入）" : "接口未返回 themes，请确认酒馆版本"));
+        }
         return added;
     }
 
@@ -325,7 +371,6 @@
         ctx.fillStyle = "rgba(255,255,255,.12)";
         ctx.fillRect(16, 20, w - 32, 36);
         ctx.fillRect(16, 68, (w - 32) * .7, 28);
-        ctx.fillRect(16, 108, (w - 32) * .85, 28);
         return cv.toDataURL("image/png");
     }
     function ensureThumb(t) {
@@ -341,7 +386,6 @@
     const MOBILE_RULES = [
         { re: /(?:^|[;\s])(?:width|height)\s*:\s*(\d{4,})px/g, lv: "❌", hint: m => `固定 ${m[1]}px 可能超出手机视口` },
         { re: /min-width\s*:\s*([5-9]\d{2,})px/g, lv: "❌", hint: m => `min-width:${m[1]}px 易撑破视口` },
-        { re: /padding\s*:\s*(\d{3,})px/g, lv: "⚠️", hint: m => `padding:${m[1]}px 过大` },
         { re: /position\s*:\s*fixed/g, lv: "⚠️", hint: () => "position:fixed 可能遮挡输入区" },
     ];
     function auditMobile(css) {
@@ -350,213 +394,10 @@
             r.re.lastIndex = 0; let m;
             while ((m = r.re.exec(css))) issues.push(`L${css.slice(0, m.index).split("\n").length} ${r.lv} ${r.hint(m)}`);
         }
-        css.split("\n").forEach((l, i) => {
-            if (/:(hover)\b/.test(l) && !/@media/.test(l)) issues.push(`L${i + 1} ℹ️ :hover 在触屏无效`);
-        });
         return issues.length ? issues : ["✅ 未发现明显移动端问题"];
     }
     function buildMobileFix() {
-        return "/* auto mobile-fix */\n@media (max-width:425px){\n  #chat,.mes,.mes_block,.mes_text,#send_form,#form_sheld{min-width:0!important;max-width:100%!important}\n  .mes{padding:8px!important}\n}";
-    }
-
-    const CHAT_BASE = [
-        ["char", "<em>（擦拭杯子，微笑）</em>欢迎光临旅店，旅人。<q>「第一杯蜂蜜酒算我请的。」</q>", "Seraphina"],
-        ["user", "（推开门，抖落肩上的雪）路上遇到暴风雪了。"],
-        ["char", "哎呀，瞧你一身雪。快到壁炉边坐。<u>壁炉旁很暖和。</u>", "Seraphina"],
-        ["user", "多谢。这里比传闻中还热闹。"],
-        ["char", "<strong>旁白：</strong>吟游诗人刚讲了个龙的笑话。<em>（她眨了眨眼）</em>", "Seraphina"],
-        ["user", "我最喜欢龙的笑话。"],
-        ["char", "龙走进旅店，所有人都跑光了——因为它挤不进门！😄", "Seraphina"],
-        ["user", "（喷出一口酒）哈哈哈这也太冷了！"],
-        ["char", "那接下来想听什么？冒险故事，还是……你自己的故事？", "Seraphina"],
-        ["user", "我的故事？不过是个满身风雪的旅人罢了。"],
-        ["char", "<em>（递过热杯）</em>每个人都有故事。喝完这杯再上路不迟。", "Seraphina"],
-        ["user", "好。再给我讲一个吧。"],
-        ["char", "从前有个旅人，以为风雪是终点，结果推开了旅店的门。", "Seraphina"],
-        ["user", "……你这是在说我？"],
-        ["char", "<q>「也许。」</q>她笑了笑。", "Seraphina"],
-        ["user", "那我就当这是个好兆头。"],
-        ["char", "壁炉里的木柴噼啪作响，像在鼓掌。", "Seraphina"],
-        ["user", "今天能在这里落脚，真幸运。"],
-        ["char", "旅店的门，永远为风雪中的人开着。", "Seraphina"],
-        ["user", "我会记住的。"],
-    ];
-    const AV = (ch, color) => "data:image/svg+xml," + encodeURIComponent(
-        `<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96"><rect width="96" height="96" fill="${color}"/><text x="48" y="60" font-size="34" text-anchor="middle" fill="#fff" font-family="sans-serif">${ch}</text></svg>`);
-    const AV_CHAR = AV("S", "#5b6ee1");
-    const AV_USER = AV("你", "#3f78bc");
-
-    const SANDBOX_CSS = `
-*{box-sizing:border-box} html,body{height:100%;margin:0}
-body{
-  display:flex;flex-direction:column;
-  font:15px/1.65 system-ui,"Segoe UI","Microsoft YaHei",sans-serif;
-  background:var(--SmartThemeBlurTintColor,#12121a);
-  color:var(--SmartThemeBodyColor,#e8e8f0);
-  overflow:hidden;
-}
-#top-bar{
-  flex:0 0 auto;display:flex;align-items:center;justify-content:space-between;
-  padding:8px 12px;border-bottom:1px solid var(--SmartThemeBorderColor,rgba(255,255,255,.12));
-  font-size:13px;opacity:.9;
-}
-#sheld{flex:1;display:flex;flex-direction:column;min-height:0;width:100%}
-#chat{flex:1;overflow-y:auto;padding:10px 12px;min-height:0}
-.mes{display:flex;gap:10px;margin:12px 0;align-items:flex-start}
-.mes.is_user{flex-direction:row-reverse}
-.avatar{width:42px;height:42px;border-radius:50%;overflow:hidden;flex:0 0 auto}
-.avatar img{width:100%;height:100%;object-fit:cover;display:block}
-.mes_block{max-width:min(92%,520px);min-width:0}
-.ch_name{font-size:12px;opacity:.7;margin-bottom:4px}
-.mes_text{
-  padding:9px 12px;border-radius:14px;white-space:pre-wrap;word-break:break-word;
-  background:var(--SmartThemeBotMesBlurTintColor,rgba(255,255,255,.06));
-  border:1px solid var(--SmartThemeBorderColor,transparent);
-  color:var(--SmartThemeBodyColor,inherit);
-}
-.mes.is_user .mes_text{background:var(--SmartThemeUserMesBlurTintColor,rgba(255,255,255,.1))}
-.mes_text em{color:var(--SmartThemeEmColor,#b8e0c8);font-style:italic}
-.mes_text u{color:var(--SmartThemeUnderlineColor,#b8e0c8);text-decoration:underline}
-.mes_text q{color:var(--SmartThemeQuoteColor,#e0a86a)}
-.mes_text strong{font-weight:700}
-#form_sheld{
-  flex:0 0 auto;border-top:1px solid var(--SmartThemeBorderColor,rgba(255,255,255,.12));
-  padding:10px 12px;
-  background:color-mix(in srgb,var(--SmartThemeBlurTintColor,#12121a) 90%,#000);
-}
-#send_form{display:flex;gap:8px;align-items:flex-end}
-#send_textarea{
-  flex:1;min-height:38px;max-height:90px;resize:none;padding:8px 12px;border-radius:12px;
-  border:1px solid var(--SmartThemeBorderColor,rgba(255,255,255,.15));
-  background:rgba(255,255,255,.06);color:inherit;font:inherit;outline:none;
-}
-#send_but{
-  width:40px;height:40px;border-radius:50%;display:grid;place-items:center;
-  background:var(--SmartThemeQuoteColor,#5b6ee1);color:#fff;font-size:15px;
-}
-.tm-hint{text-align:center;font-size:11px;opacity:.4;padding:8px}
-`;
-
-    function buildSandboxHTML({ msgCount = 3, themeCss = "" } = {}) {
-        const n = Math.max(1, Math.min(20, Number(msgCount) || 3));
-        const msgs = [];
-        for (let i = 0; i < n; i++) {
-            const [who, body, name] = CHAT_BASE[i % CHAT_BASE.length];
-            const isUser = who === "user";
-            msgs.push(`<div class="mes ${isUser ? "is_user" : ""}">
-  <div class="avatar"><img src="${isUser ? AV_USER : AV_CHAR}" alt=""></div>
-  <div class="mes_block">
-    <div class="ch_name">${isUser ? "你" : (name || "Seraphina")}</div>
-    <div class="mes_text">${body}</div>
-  </div>
-</div>`);
-        }
-        const safe = String(themeCss).replace(/<\/(style|script)/gi, "<\\/$1");
-        return `<!DOCTYPE html>
-<html lang="zh-CN"><head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<style>${SANDBOX_CSS}</style>
-<style id="tm-preview-style">${safe}</style>
-</head>
-<body>
-<div id="top-bar"><span>SillyTavern · 沙盒预览</span><span>iframe</span></div>
-<div id="sheld">
-  <div id="chat">
-    ${msgs.join("\n")}
-    <div class="tm-hint">— ${n} 条示例 · 实时 CSS · 不截图 —</div>
-  </div>
-  <div id="form_sheld">
-    <div id="send_form">
-      <textarea id="send_textarea" rows="1" placeholder="在此输入消息…" readonly></textarea>
-      <div id="send_but">➤</div>
-    </div>
-  </div>
-</div>
-</body></html>`;
-    }
-
-    /** M2 预览系统：iframe 沙盒实时预览 */
-    const DEVICES = {
-        mobile:    { w: 390,  h: 720, label: "手机" },
-        landscape: { w: 844,  h: 390, label: "横屏" },
-        tablet:    { w: 768,  h: 900, label: "平板" },
-        pc:        { w: 1920, h: 940, label: "PC" },
-    };
-
-    class PreviewManager {
-        constructor($root) {
-            this.$root = $root;
-            this.css = "";
-            this.device = "mobile";
-            this.msgCount = 3;
-            this._built = false;
-        }
-        mount() {
-            if (this._built) return;
-            this._built = true;
-            const devBtns = Object.entries(DEVICES).map(([k, d]) =>
-                `<button type="button" class="menu_button tm-dev ${k === "mobile" ? "tm-on" : ""}" data-dev="${k}" title="${d.w}×${d.h}">${d.label}</button>`
-            ).join("");
-            this.$root.html(`
-              <div class="tm-prev-bar">
-                <div class="tm-prev-devices">${devBtns}</div>
-                <div class="tm-prev-right">
-                  <select class="tm-msg-count" title="聊天长度">
-                    <option value="3">3 条</option>
-                    <option value="20">20 条</option>
-                  </select>
-                  <button type="button" class="menu_button tm-refresh" title="手动刷新">🔄</button>
-                </div>
-              </div>
-              <div class="tm-prev-stage">
-                <div class="tm-prev-framebox">
-                  <iframe class="tm-prev-frame" sandbox="allow-same-origin" title="主题预览"></iframe>
-                </div>
-              </div>`);
-            this.$frame = this.$root.find(".tm-prev-frame");
-            this.$box = this.$root.find(".tm-prev-framebox");
-            this.$stage = this.$root.find(".tm-prev-stage");
-            this.$root.on("click", ".tm-dev", e => {
-                this.device = $(e.currentTarget).data("dev");
-                this.$root.find(".tm-dev").removeClass("tm-on");
-                $(e.currentTarget).addClass("tm-on");
-                this.relayout();
-            });
-            this.$root.on("change", ".tm-msg-count", e => {
-                this.msgCount = Number(e.target.value) || 3;
-                this.rebuild();
-            });
-            this.$root.on("click", ".tm-refresh", () => this.rebuild());
-            $(window).on("resize.tm_prev", () => this.relayout());
-            this.rebuild();
-        }
-        setCss(css) {
-            this.css = String(css || "");
-            const el = this.$frame?.[0]?.contentDocument?.getElementById("tm-preview-style");
-            if (el) el.textContent = this.css;
-            else this.rebuild();
-        }
-        rebuild() {
-            const frame = this.$frame?.[0];
-            if (!frame) return;
-            frame.onload = () => {
-                this.setCss(this.css);
-                this.relayout();
-            };
-            frame.srcdoc = buildSandboxHTML({ msgCount: this.msgCount, themeCss: this.css });
-        }
-        relayout() {
-            if (!this.$frame?.length) return;
-            const d = DEVICES[this.device] || DEVICES.mobile;
-            const avail = Math.max(160, (this.$stage.width() || 360) - 16);
-            const s = Math.min(1, avail / d.w);
-            this.$frame.css({ width: d.w, height: d.h, transform: `scale(${s})` });
-            this.$box.css({ width: Math.floor(d.w * s), height: Math.floor(d.h * s) });
-        }
-        destroy() {
-            $(window).off("resize.tm_prev");
-        }
+        return "/* auto mobile-fix */\n@media (max-width:425px){\n  #chat,.mes,.mes_block,.mes_text,#send_form,#form_sheld{min-width:0!important;max-width:100%!important}\n}";
     }
 
     const CM_VER = "5.65.18";
@@ -594,14 +435,13 @@ body{
                 const emit = () => {
                     clearTimeout(ct);
                     ct = setTimeout(() => {
-                        try { onCursor(cm.getValue(), cm.indexFromPos(cm.getCursor())); } catch { /* */ }
+                        try { onCursor(cm.getValue(), cm.indexFromPos(cm.getCursor())); } catch {}
                     }, 100);
                 };
                 cm.on("cursorActivity", emit);
                 cm.on("mousedown", emit);
             }
-            const api = { _cm: cm, getValue: () => cm.getValue(), setValue: v => cm.setValue(v || ""), focus: () => cm.focus(), refresh: () => cm.refresh() };
-            return api;
+            return { _cm: cm, getValue: () => cm.getValue(), setValue: v => cm.setValue(v || ""), focus: () => cm.focus(), refresh: () => cm.refresh() };
         } catch (e) {
             console.warn("[美化管理] CodeMirror 降级", e);
             const ta = document.createElement("textarea");
@@ -615,6 +455,157 @@ body{
             }
             return { _ta: ta, getValue: () => ta.value, setValue: v => { ta.value = v || ""; }, focus: () => ta.focus(), refresh: () => {} };
         }
+    }
+
+    function selectorsAtCursor(css, index) {
+        if (!css || index < 0) return [];
+        let i = Math.min(index, css.length - 1);
+        while (i > 0 && css[i] !== "{") {
+            if (css[i] === "}" && i < index) break;
+            i--;
+        }
+        if (css[i] !== "{") return [];
+        let j = i - 1;
+        while (j >= 0 && css[j] !== "}") j--;
+        let raw = css.slice(j + 1, i).replace(/\/\*[\s\S]*?\*\//g, "").trim();
+        if (!raw) return [];
+        if (raw.includes("{")) raw = raw.slice(raw.lastIndexOf("{") + 1).trim();
+        if (!raw || raw.startsWith("@")) return [];
+        return raw.split(",").map(s => s.trim()).filter(s => s && !s.startsWith("@"));
+    }
+    let _hlTimer = null;
+    function clearPageHighlight() {
+        document.querySelectorAll(".tm-hl").forEach(el => el.classList.remove("tm-hl"));
+    }
+    function highlightInPage(selectors) {
+        clearTimeout(_hlTimer);
+        clearPageHighlight();
+        if (!selectors?.length) return;
+        let first = null;
+        for (const sel of selectors) {
+            let list;
+            try { list = document.querySelectorAll(sel); } catch { continue; }
+            list.forEach(el => {
+                if (el.closest("#tm_panel, #tm_edit, #tm_report, #tm_menu_entry, #tm_floating_menu")) return;
+                el.classList.add("tm-hl");
+                if (!first) first = el;
+            });
+        }
+        if (first) {
+            try { first.scrollIntoView({ block: "center", behavior: "smooth" }); } catch {}
+        }
+        _hlTimer = setTimeout(clearPageHighlight, 2500);
+    }
+    function parseCssRules(css) {
+        const rules = [];
+        const src = String(css || "");
+        let i = 0;
+        while (i < src.length) {
+            if (src[i] === "/" && src[i + 1] === "*") {
+                const end = src.indexOf("*/", i + 2);
+                i = end < 0 ? src.length : end + 2;
+                continue;
+            }
+            if (src[i] === "{") {
+                let s = i - 1;
+                while (s >= 0 && /\s/.test(src[s])) s--;
+                let start = s;
+                while (start >= 0 && src[start] !== "}" && src[start] !== "{") start--;
+                start += 1;
+                while (start < i && /\s/.test(src[start])) start++;
+                let sel = src.slice(start, i).replace(/\/\*[\s\S]*?\*\//g, "").trim();
+                let depth = 0, j = i;
+                for (; j < src.length; j++) {
+                    if (src[j] === "/" && src[j + 1] === "*") {
+                        const e = src.indexOf("*/", j + 2);
+                        j = e < 0 ? src.length : e + 1;
+                        continue;
+                    }
+                    if (src[j] === "{") depth++;
+                    else if (src[j] === "}") {
+                        depth--;
+                        if (depth === 0) { j++; break; }
+                    }
+                }
+                if (sel && !sel.startsWith("@")) {
+                    const parts = sel.split("{");
+                    sel = parts[parts.length - 1].trim();
+                    if (sel && !sel.startsWith("@")) rules.push({ selector: sel, start, brace: i, end: j });
+                }
+                i = j;
+                continue;
+            }
+            i++;
+        }
+        return rules;
+    }
+    function rulesMatchingElement(css, el) {
+        if (!el || !css) return [];
+        const hit = [];
+        for (const rule of parseCssRules(css)) {
+            for (const sel of rule.selector.split(",").map(s => s.trim()).filter(Boolean)) {
+                try {
+                    if (el.matches(sel)) { hit.push({ ...rule, matched: sel }); break; }
+                } catch {}
+            }
+        }
+        hit.sort((a, b) => b.matched.length - a.matched.length);
+        return hit;
+    }
+    function jumpEditorToIndex(index) {
+        const ed = ED.editor;
+        if (!ed) return;
+        if (ed._cm) {
+            const cm = ed._cm;
+            const pos = cm.posFromIndex(Math.max(0, index));
+            cm.setCursor(pos);
+            cm.scrollIntoView(pos, 80);
+            cm.focus();
+            return;
+        }
+        if (ed._ta) {
+            const ta = ed._ta;
+            ta.focus();
+            ta.setSelectionRange(index, index);
+            const lines = ta.value.slice(0, index).split("\n").length;
+            ta.scrollTop = Math.max(0, (lines - 5) * 16);
+        }
+    }
+    function onPagePick(e) {
+        if (!ED.themeId || $("#tm_edit").hasClass("tm-hidden")) return;
+        const t = e.target;
+        if (!(t instanceof Element)) return;
+        if (t.closest("#tm_panel, #tm_edit, #tm_report, #tm_menu_entry, #tm_floating_menu, #extensionsMenu")) return;
+        if (t === document.documentElement || t === document.body) return;
+        const css = ED.editor?.getValue?.() || "";
+        let el = t, hits = [];
+        while (el && el !== document.body) {
+            hits = rulesMatchingElement(css, el);
+            if (hits.length) break;
+            el = el.parentElement;
+        }
+        if (!hits.length) {
+            toastr?.info?.("当前 CSS 中没有匹配该元素的规则");
+            return;
+        }
+        e.preventDefault();
+        e.stopPropagation();
+        const best = hits[0];
+        jumpEditorToIndex(best.start);
+        clearPageHighlight();
+        el.classList.add("tm-hl");
+        clearTimeout(_hlTimer);
+        _hlTimer = setTimeout(clearPageHighlight, 2500);
+        toastr?.info?.(`已跳到：${best.matched.slice(0, 48)}${best.matched.length > 48 ? "…" : ""}`);
+    }
+    function enablePagePick() {
+        document.addEventListener("click", onPagePick, true);
+        document.body.classList.add("tm-pick-mode");
+    }
+    function disablePagePick() {
+        document.removeEventListener("click", onPagePick, true);
+        document.body.classList.remove("tm-pick-mode");
+        clearPageHighlight();
     }
 
     function relTime(ts) {
@@ -665,7 +656,6 @@ body{
               <button type="button" class="menu_button tm-edit">编辑</button>
               <button type="button" class="menu_button tm-del">删除</button>
               <button type="button" class="menu_button tm-more" title="更多">…</button>
-              <div class="tm-menu tm-hidden"></div>
             </div></div></div>`;
     }
     function renderTags() {
@@ -693,16 +683,39 @@ body{
             return !!(await hydratePreview(t.id));
         })).then(flags => { if (flags.some(Boolean)) renderList(); });
     }
+
+    function handleMoreAction(id, act) {
+        const t = S().themes[id]; if (!t) return;
+        switch (act) {
+            case "export": exportTheme(id, true); break;
+            case "exportExt": exportTheme(id, false); break;
+            case "pvgen": {
+                const pv = gradientPreviewDataUrl(buildActiveCss(t, S().toggles[id]) || t.rawCss, 360, 240);
+                setPreview(id, pv).then(() => { renderList(); toastr?.success?.("预览图已生成"); });
+                break;
+            }
+            case "pvd": setPreview(id, "").then(() => { renderList(); toastr?.info?.("预览图已删除"); }); break;
+            case "dup": {
+                const n = createTheme({ name: t.name + " 副本", css: t.rawCss, author: t.author, tags: [...(t.tags||[])], scope: t.scope });
+                addTheme(n); ensureThumb(n); renderList(); break;
+            }
+            case "audit": showReport(`移动端体检 · ${t.name}`, auditMobile(buildActiveCss(t, S().toggles[id]))); break;
+            case "fix":
+                S().mobileFix[id] = { enabled: true, css: buildMobileFix() };
+                saveSettingsDebounced(); refreshAll(); toastr?.success?.("已生成 mobile-fix"); break;
+            case "fixdel":
+                delete S().mobileFix[id]; saveSettingsDebounced(); refreshAll(); toastr?.info?.("已删除移动修复"); break;
+            case "del": deleteTheme(id); break;
+        }
+    }
     function toggleMoreMenu($btn) {
         const $card = $btn.closest(".tm-card");
-        let $menu = $card.find(".tm-menu");
-        if (!$menu.length) { $menu = $('<div class="tm-menu tm-hidden"></div>'); $card.find(".tm-actions").append($menu); }
-        if (!$menu.hasClass("tm-hidden")) { $menu.addClass("tm-hidden"); return; }
-        $(".tm-menu").addClass("tm-hidden");
         const id = String($card.data("theme") || "");
         const t = S().themes[id]; if (!t) return;
+        $("#tm_floating_menu").remove();
         const hasFix = !!S().mobileFix[id];
-        $menu.html(`
+        const rect = $btn[0].getBoundingClientRect();
+        const $menu = $(`<div id="tm_floating_menu" class="tm-menu" data-theme="${id}">
           <button type="button" class="tm-mi" data-act="export">导出（酒馆格式）</button>
           <button type="button" class="tm-mi" data-act="exportExt">导出（扩展格式）</button>
           <button type="button" class="tm-mi" data-act="pvgen">生成预览图</button>
@@ -711,7 +724,22 @@ body{
           <button type="button" class="tm-mi" data-act="audit">移动端体检</button>
           <button type="button" class="tm-mi" data-act="fix">${hasFix?"重建移动修复":"一键移动修复"}</button>
           ${hasFix?`<button type="button" class="tm-mi" data-act="fixdel">删除移动修复</button>`:""}
-          <button type="button" class="tm-mi tm-danger" data-act="del">删除主题</button>`).removeClass("tm-hidden");
+          <button type="button" class="tm-mi tm-danger" data-act="del">删除主题</button>
+        </div>`);
+        $("body").append($menu);
+        const mw = $menu.outerWidth() || 180;
+        const mh = $menu.outerHeight() || 240;
+        let left = rect.right - mw;
+        let top = rect.bottom + 4;
+        if (left < 8) left = 8;
+        if (top + mh > window.innerHeight - 8) top = Math.max(8, rect.top - mh - 4);
+        $menu.css({ position: "fixed", left, top, zIndex: 32000 });
+        $menu.on("click", ".tm-mi", function (e) {
+            e.preventDefault(); e.stopPropagation();
+            const act = $(this).data("act");
+            $("#tm_floating_menu").remove();
+            handleMoreAction(id, act);
+        });
     }
     function showReport(title, lines) {
         $("#tm_report").remove();
@@ -721,194 +749,6 @@ body{
         $("#tm_report").on("click", e => { if (e.target.id === "tm_report") $("#tm_report").remove(); });
         $(".tm-report-close").on("click", () => $("#tm_report").remove());
     }
-
-
-    /** 从光标位置解析当前 CSS 规则选择器 */
-    function selectorsAtCursor(css, index) {
-        if (!css || index < 0) return [];
-        let i = Math.min(index, css.length - 1);
-        while (i > 0 && css[i] !== "{") {
-            if (css[i] === "}" && i < index) break;
-            i--;
-        }
-        if (css[i] !== "{") return [];
-        let j = i - 1;
-        while (j >= 0 && css[j] !== "}") j--;
-        let raw = css.slice(j + 1, i).replace(/\/\*[\s\S]*?\*\//g, "").trim();
-        if (!raw) return [];
-        // 去掉 @media 等，取最内层选择器段
-        if (raw.includes("{")) {
-            const last = raw.lastIndexOf("{");
-            raw = raw.slice(last + 1).trim();
-        }
-        // 去掉尾部杂项
-        raw = raw.replace(/^[^{]*@[\w-]+[^{]*$/m, "").trim();
-        if (!raw || raw.startsWith("@")) return [];
-        return raw.split(",").map(s => s.trim()).filter(s => s && !s.startsWith("@"));
-    }
-
-    let _hlTimer = null;
-    function clearPageHighlight() {
-        document.querySelectorAll(".tm-hl").forEach(el => el.classList.remove("tm-hl"));
-    }
-    /** 在真实页面高亮选择器命中的元素 */
-    function highlightInPage(selectors) {
-        clearTimeout(_hlTimer);
-        clearPageHighlight();
-        if (!selectors?.length) return;
-        let first = null;
-        for (const sel of selectors) {
-            let list;
-            try { list = document.querySelectorAll(sel); } catch { continue; }
-            list.forEach(el => {
-                // 不高亮扩展自己的面板
-                if (el.closest("#tm_panel, #tm_edit, #tm_report, #tm_menu_entry")) return;
-                el.classList.add("tm-hl");
-                if (!first) first = el;
-            });
-        }
-        if (first) {
-            try { first.scrollIntoView({ block: "center", behavior: "smooth" }); } catch { /* */ }
-        }
-        _hlTimer = setTimeout(clearPageHighlight, 1800);
-    }
-
-    /** 解析 CSS 文本中的规则：{ selector, start, brace, end } */
-    function parseCssRules(css) {
-        const rules = [];
-        const src = String(css || "");
-        let i = 0;
-        while (i < src.length) {
-            // skip comments
-            if (src[i] === "/" && src[i + 1] === "*") {
-                const end = src.indexOf("*/", i + 2);
-                i = end < 0 ? src.length : end + 2;
-                continue;
-            }
-            if (src[i] === "{") {
-                // find selector start: after previous } or beginning
-                let s = i - 1;
-                while (s >= 0 && /\s/.test(src[s])) s--;
-                let start = s;
-                while (start >= 0 && src[start] !== "}" && src[start] !== "{" ) start--;
-                start += 1;
-                while (start < i && /\s/.test(src[start])) start++;
-                let sel = src.slice(start, i).replace(/\/\*[\s\S]*?\*\//g, "").trim();
-                // balance braces for body
-                let depth = 0, j = i;
-                for (; j < src.length; j++) {
-                    if (src[j] === "/" && src[j + 1] === "*") {
-                        const e = src.indexOf("*/", j + 2);
-                        j = e < 0 ? src.length : e + 1;
-                        continue;
-                    }
-                    if (src[j] === "{") depth++;
-                    else if (src[j] === "}") {
-                        depth--;
-                        if (depth === 0) { j++; break; }
-                    }
-                }
-                if (sel && !sel.startsWith("@")) {
-                    // drop trailing @media junk: take last segment if nested weirdly
-                    const parts = sel.split("{");
-                    sel = parts[parts.length - 1].trim();
-                    if (sel && !sel.startsWith("@")) {
-                        rules.push({ selector: sel, start, brace: i, end: j });
-                    }
-                }
-                i = j;
-                continue;
-            }
-            i++;
-        }
-        return rules;
-    }
-
-    /** 元素 → 命中的 CSS 规则（按选择器长度粗略排序，更具体优先） */
-    function rulesMatchingElement(css, el) {
-        if (!el || !css) return [];
-        const hit = [];
-        for (const rule of parseCssRules(css)) {
-            const sels = rule.selector.split(",").map(s => s.trim()).filter(Boolean);
-            for (const sel of sels) {
-                try {
-                    if (el.matches(sel)) {
-                        hit.push({ ...rule, matched: sel });
-                        break;
-                    }
-                } catch { /* invalid selector */ }
-            }
-        }
-        hit.sort((a, b) => b.matched.length - a.matched.length);
-        return hit;
-    }
-
-    function jumpEditorToIndex(index) {
-        const ed = ED.editor;
-        if (!ed) return;
-        // CodeMirror
-        if (ed._cm) {
-            const cm = ed._cm;
-            const pos = cm.posFromIndex(Math.max(0, index));
-            cm.setCursor(pos);
-            cm.scrollIntoView(pos, 80);
-            cm.focus();
-            return;
-        }
-        // textarea fallback via internal ref
-        if (ed._ta) {
-            const ta = ed._ta;
-            ta.focus();
-            ta.setSelectionRange(index, index);
-            // rough scroll
-            const lines = ta.value.slice(0, index).split("\n").length;
-            ta.scrollTop = Math.max(0, (lines - 5) * 16);
-        }
-    }
-
-    function onPagePick(e) {
-        if (!ED.themeId || $("#tm_edit").hasClass("tm-hidden")) return;
-        const t = e.target;
-        if (!(t instanceof Element)) return;
-        if (t.closest("#tm_panel, #tm_edit, #tm_report, #tm_menu_entry, #extensionsMenu")) return;
-        // 忽略纯文档根
-        if (t === document.documentElement || t === document.body) return;
-
-        const css = ED.editor?.getValue?.() || "";
-        // 从点击目标向上找，直到命中某条规则
-        let el = t;
-        let hits = [];
-        while (el && el !== document.body) {
-            hits = rulesMatchingElement(css, el);
-            if (hits.length) break;
-            el = el.parentElement;
-        }
-        if (!hits.length) {
-            toastr?.info?.("当前 CSS 中没有匹配该元素的规则");
-            return;
-        }
-        e.preventDefault();
-        e.stopPropagation();
-        const best = hits[0];
-        jumpEditorToIndex(best.start);
-        // 高亮页面元素 + 短暂提示
-        clearPageHighlight();
-        el.classList.add("tm-hl");
-        clearTimeout(_hlTimer);
-        _hlTimer = setTimeout(clearPageHighlight, 1800);
-        toastr?.info?.(`已跳到规则：${best.matched.slice(0, 48)}${best.matched.length > 48 ? "…" : ""}`);
-    }
-
-    function enablePagePick() {
-        document.addEventListener("click", onPagePick, true);
-        document.body.classList.add("tm-pick-mode");
-    }
-    function disablePagePick() {
-        document.removeEventListener("click", onPagePick, true);
-        document.body.classList.remove("tm-pick-mode");
-        clearPageHighlight();
-    }
-
 
     async function openEditor(themeId) {
         try {
@@ -941,10 +781,10 @@ body{
             ED.dirty = false;
             setLivePreviewCss(css);
             refreshAll();
-            requestAnimationFrame(() => { try { ED.editor.refresh(); } catch { /* */ } });
-            ED.editor.focus();
             enablePagePick();
-            toastr?.info?.("真实预览已开启：改代码即生效；点击页面元素可跳到对应规则");
+            requestAnimationFrame(() => { try { ED.editor.refresh(); } catch {} });
+            ED.editor.focus();
+            toastr?.info?.("真实预览：改代码即生效；点页面可跳到规则");
         } catch (e) {
             console.error("[美化管理] openEditor", e);
             toastr?.error?.("打开编辑失败：" + (e.message || e));
@@ -956,7 +796,8 @@ body{
         clearLivePreview();
         clearPageHighlight();
         ED.themeId = null; ED.dirty = false;
-        $("#tm_edit").addClass("tm-hidden"); $("#tm_panel").removeClass("tm-hidden");
+        $("#tm_edit").addClass("tm-hidden");
+        $("#tm_panel").removeClass("tm-hidden");
         refreshAll(); renderList();
     }
     function saveEditor() {
@@ -1042,12 +883,10 @@ body{
           <div class="tm-edit-head">
             <button type="button" id="tm_edit_back" class="menu_button">← 返回</button>
             <input id="tm_edit_name" class="text_pole" placeholder="主题名称">
-            <span class="tm-edit-info">真实预览 · 点页面跳转规则 · 光标高亮元素 · Ctrl+S 保存 · Esc 返回</span>
+            <span class="tm-edit-info">真实预览 · 点页面跳转规则 · 光标高亮 · Ctrl+S · Esc</span>
             <button type="button" id="tm_edit_save" class="menu_button">保存</button>
           </div>
-          <div class="tm-edit-body">
-            <div id="tm_edit_code"></div>
-          </div>
+          <div class="tm-edit-body"><div id="tm_edit_code"></div></div>
         </div>`);
 
         $("#tm_close").on("click", () => $("#tm_panel").addClass("tm-hidden"));
@@ -1102,40 +941,11 @@ body{
                 const id = String($(this).closest(".tm-card").data("theme") || "");
                 const block = $(this).data("block");
                 if (id && block) setBlockToggle(id, block, !!this.checked);
-            })
-            .on("click", ".tm-mi", function (e) {
-                e.preventDefault(); e.stopPropagation();
-                const id = String($(this).closest(".tm-card").data("theme") || "");
-                const act = $(this).data("act"); const t = S().themes[id];
-                $(".tm-menu").addClass("tm-hidden"); if (!t) return;
-                switch (act) {
-                    case "export": exportTheme(id, true); break;
-                    case "exportExt": exportTheme(id, false); break;
-                    case "pvgen": {
-                        const pv = gradientPreviewDataUrl(buildActiveCss(t, S().toggles[id]) || t.rawCss, 360, 240);
-                        setPreview(id, pv).then(() => { renderList(); toastr?.success?.("预览图已生成"); });
-                        break;
-                    }
-                    case "pvd":
-                        setPreview(id, "").then(() => { renderList(); toastr?.info?.("预览图已删除"); });
-                        break;
-                    case "dup": {
-                        const n = createTheme({ name: t.name + " 副本", css: t.rawCss, author: t.author, tags: [...(t.tags||[])], scope: t.scope });
-                        addTheme(n); ensureThumb(n); renderList(); break;
-                    }
-                    case "audit": showReport(`移动端体检 · ${t.name}`, auditMobile(buildActiveCss(t, S().toggles[id]))); break;
-                    case "fix":
-                        S().mobileFix[id] = { enabled: true, css: buildMobileFix() };
-                        saveSettingsDebounced(); refreshAll(); toastr?.success?.("已生成 mobile-fix"); break;
-                    case "fixdel":
-                        delete S().mobileFix[id]; saveSettingsDebounced(); refreshAll(); toastr?.info?.("已删除移动修复层"); break;
-                    case "del": deleteTheme(id); break;
-                }
             });
 
         $(document).on("click.tm_menu", e => {
-            if ($(e.target).closest(".tm-more, .tm-menu").length) return;
-            $(".tm-menu").addClass("tm-hidden");
+            if ($(e.target).closest(".tm-more, #tm_floating_menu").length) return;
+            $("#tm_floating_menu").remove();
         });
         document.addEventListener("keydown", e => {
             if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s" && !$("#tm_edit").hasClass("tm-hidden")) {
@@ -1153,11 +963,11 @@ body{
         (async () => {
             try {
                 const ids = await syncTavernThemes({ manual: false });
-                if (ids.length) console.info(`[美化管理] 自动导入酒馆主题 ${ids.length} 个`);
+                if (ids.length) console.info(`[美化管理] 自动导入 ${ids.length} 个`);
                 renderList();
             } catch (e) { console.warn("[美化管理] 启动同步失败", e); }
         })();
-        console.info("[美化管理] v0.7.3 已启动");
+        console.info("[美化管理] v0.7.4 已启动");
     }
 
     if (event_types?.APP_READY) {
