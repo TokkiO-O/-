@@ -1,12 +1,11 @@
 /**
- * 美化管理 Theme Manager v0.6.1
+ * 美化管理 Theme Manager v0.6.2
  *
- * v0.6.1 主要变更：
- *   1. 修复酒馆主题同步：从 /api/settings/get 的 themes 数组读取（非 power_user.themes）
- *   2. 不再依赖未导出的 applyTheme；原生主题走 CSS 变量 + custom_css 注入
- *   3. 预览模板对齐酒馆 DOM / --SmartTheme* 变量，输入区改回真实结构
- *   4. 预览图改存 IndexedDB，不写入 extension_settings，减轻启动负担
- *   5. 启动只静默导入主题元数据，不批量生成预览图
+ * v0.6.2 主要变更：
+ *   1. 预览优先克隆真实 #chat + #form_sheld（含父页样式表与 CSS 变量）
+ *   2. 无真实消息时回退 v0.6.1 仿真壳
+ *
+ * v0.6.1：同步 themes 数组、IndexedDB 预览、SmartTheme 变量等
  *
  * v0.6.0 主要变更：接入酒馆原生主题字段、导入导出、删除防复活等
  */
@@ -399,7 +398,7 @@
     }
 
     /* ================================================================
-     * M2 预览系统：仿真酒馆 DOM
+     * M2 预览系统：优先克隆真实 #chat + #form_sheld，否则仿真壳
      * ================================================================ */
     const CHAT = [
         ["char", "<em>（擦拭着杯子，抬起头微笑）</em>欢迎光临旅店，旅人。<q>第一杯蜂蜜酒算我请的。</q>🍻", "Seraphina"],
@@ -512,6 +511,157 @@
     /* ================================================================
      * M2 预览管理器
      * ================================================================ */
+
+    /* ---------- 真实克隆：#chat + #form_sheld ---------- */
+    function collectRootCssVars() {
+        const cs = getComputedStyle(document.documentElement);
+        const keys = [];
+        // 优先 SmartTheme / 布局相关
+        try {
+            for (const sheet of document.styleSheets) {
+                let rules;
+                try { rules = sheet.cssRules; } catch { continue; }
+                if (!rules) continue;
+                for (const rule of rules) {
+                    if (rule.selectorText === ":root" || rule.selectorText === "html") {
+                        const t = rule.style;
+                        for (let i = 0; i < t.length; i++) {
+                            const p = t[i];
+                            if (p.startsWith("--")) keys.push(p);
+                        }
+                    }
+                }
+            }
+        } catch { /* ignore */ }
+        const prefer = [
+            "--SmartThemeBodyColor","--SmartThemeEmColor","--SmartThemeUnderlineColor","--SmartThemeQuoteColor",
+            "--SmartThemeBlurTintColor","--SmartThemeChatTintColor","--SmartThemeUserMesBlurTintColor",
+            "--SmartThemeBotMesBlurTintColor","--SmartThemeShadowColor","--SmartThemeBorderColor",
+            "--mainFontSize","--bottomFormIconSize","--topBarBlockSize","--sheldWidth","--SmartThemeFontScale",
+        ];
+        const set = new Set([...prefer, ...keys]);
+        const lines = [];
+        for (const k of set) {
+            const v = cs.getPropertyValue(k).trim();
+            if (v) lines.push(`  ${k}: ${v};`);
+        }
+        return lines.length ? `:root {\n${lines.join("\n")}\n}` : "";
+    }
+    function collectParentStylesHtml() {
+        const parts = [];
+        // srcdoc 的 base 是 about:srcdoc，必须把 href 收成绝对 URL
+        document.querySelectorAll('link[rel="stylesheet"]').forEach(link => {
+            const raw = link.getAttribute("href");
+            if (!raw || raw.startsWith("blob:")) return;
+            if (/Theme-Manager|theme-manager|st_theme_manager/i.test(raw)) return;
+            let abs = raw;
+            try { abs = new URL(raw, location.href).href; } catch { /* keep raw */ }
+            parts.push(`<link rel="stylesheet" href="${abs.replace(/"/g, "&quot;")}">`);
+        });
+        // 内联 style：保留酒馆 custom-style，跳过本扩展注入
+        document.querySelectorAll("style").forEach(st => {
+            if (st.hasAttribute("data-theme-id")) return;
+            if (st.id === "tm-mock-base" || st.id === "tm-preview-style" || st.id === "tm-clone-rootvars" || st.id === "tm-clone-layout") return;
+            const css = st.textContent || "";
+            if (!css.trim()) return;
+            if (css.includes("#tm_panel") || css.includes("#tm_edit")) return;
+            // 体积保护：单块超过 400KB 跳过（避免把巨型注入塞进 srcdoc）
+            if (css.length > 400000) return;
+            parts.push(`<style>${css.replace(/<\/(style)/gi, "<\\/$1")}</style>`);
+        });
+        return parts.join("\n");
+    }
+
+    function sanitizeClone(root) {
+        if (!root) return null;
+        const node = root.cloneNode(true);
+        // 去脚本与交互残留
+        node.querySelectorAll("script").forEach(el => el.remove());
+        node.querySelectorAll("iframe, object, embed, video, audio").forEach(el => el.remove());
+        node.querySelectorAll("*").forEach(el => {
+            // 清 on* 属性
+            for (const attr of [...el.attributes]) {
+                if (/^on/i.test(attr.name)) el.removeAttribute(attr.name);
+            }
+            if (el.tagName === "A") {
+                el.setAttribute("href", "javascript:void(0)");
+                el.removeAttribute("target");
+            }
+            if (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "BUTTON" || el.tagName === "SELECT") {
+                el.setAttribute("tabindex", "-1");
+                if (el.tagName !== "TEXTAREA" && el.tagName !== "INPUT") el.setAttribute("disabled", "true");
+                else el.setAttribute("readonly", "true");
+            }
+        });
+        return node;
+    }
+    function limitChatMessages(chatEl, msgCount) {
+        if (!chatEl) return;
+        const mes = [...chatEl.querySelectorAll(":scope > .mes")];
+        if (mes.length <= msgCount) return;
+        // 保留最后 N 条
+        const keep = new Set(mes.slice(-msgCount));
+        mes.forEach(el => { if (!keep.has(el)) el.remove(); });
+    }
+    function buildCloneChatHTML({ msgCount = 3, themeCss = "" } = {}) {
+        const liveChat = document.getElementById("chat");
+        const liveForm = document.getElementById("form_sheld");
+        const hasMes = liveChat && liveChat.querySelector(".mes");
+        if (!hasMes || !liveForm) {
+            // 没有真实对话时回退模拟壳
+            return buildMockChatHTML({ msgCount, themeCss });
+        }
+        const chatClone = sanitizeClone(liveChat);
+        const formClone = sanitizeClone(liveForm);
+        limitChatMessages(chatClone, msgCount);
+        // 标记预览来源
+        chatClone.insertAdjacentHTML("beforeend",
+            `<div class="tm-hint" style="text-align:center;font-size:11px;opacity:.45;padding:8px 0;">— 真实 DOM 克隆（${msgCount} 条）· 一切以真实应用为准 —</div>`);
+
+        const rootVars = collectRootCssVars();
+        const parentStyles = collectParentStylesHtml();
+        const safeCss = String(themeCss).replace(/<\/(style|script)/gi, "<\\/$1");
+        const chatHtml = chatClone.outerHTML;
+        const formHtml = formClone.outerHTML;
+
+        return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+${parentStyles}
+<style id="tm-clone-rootvars">${rootVars}</style>
+<style id="tm-clone-layout">
+  html, body { height: 100%; margin: 0; }
+  body {
+    display: flex; flex-direction: column; min-height: 100%;
+    background: var(--SmartThemeBlurTintColor, #181825);
+    color: var(--SmartThemeBodyColor, #eee);
+    overflow: hidden;
+  }
+  #tm-clone-wrap {
+    flex: 1; display: flex; flex-direction: column; min-height: 0; width: 100%;
+  }
+  #chat {
+    flex: 1 1 auto; min-height: 0; overflow-y: auto !important;
+    max-height: none !important;
+  }
+  #form_sheld { flex: 0 0 auto; }
+  /* 预览内隐藏易干扰元素 */
+  #rm_button_panel, #top-bar, #top-settings-holder, #extensionsMenu,
+  .drawer, #left-nav-panel, #right-nav-panel { display: none !important; }
+</style>
+<style id="tm-preview-style">${safeCss}</style>
+</head>
+<body class="${document.body.className || ""}">
+<div id="tm-clone-wrap">
+${chatHtml}
+${formHtml}
+</div>
+</body>
+</html>`;
+    }
+
     const DEVICES = {
         mobile:    { w: 390,  h: 720, icon: "📱", label: "手机" },
         landscape: { w: 844,  h: 390, icon: "↔️", label: "横屏" },
@@ -572,7 +722,8 @@
             if (!this.$frame) return;
             const frame = this.$frame[0];
             frame.onload = () => { this.setCss(this.css); this.relayout(); };
-            frame.srcdoc = buildMockChatHTML({ msgCount: this.msgCount, themeCss: this.css });
+            // 优先克隆真实 #chat + #form_sheld；无消息时回退模拟壳
+            frame.srcdoc = buildCloneChatHTML({ msgCount: this.msgCount, themeCss: this.css });
         }
         setCss(css) {
             this.css = css;
