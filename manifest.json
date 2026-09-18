@@ -1,12 +1,12 @@
-	{
-	    "display_name": "美化管理 Theme Manager",
-	    "loading_order": 100,
-	    "requires": [],
-	    "optional": [],
-	    "js": "index.js",
-	    "css": "style.css",
-	    "author": "TokkiO-O",
-	    "version": "0.5.1",
-	    "homePage": "https://github.com/TokkiO-O/Theme-Manager",
-	    "auto_update": true
-	}
+{
+    "display_name": "美化管理 Theme Manager",
+    "loading_order": 100,
+    "requires": [],
+    "optional": [],
+    "js": "index.js",
+    "css": "style.css",
+    "author": "TokkiO-O",
+    "version": "0.6.0",
+    "homePage": "https://github.com/TokkiO-O/Theme-Manager",
+    "auto_update": true
+}
