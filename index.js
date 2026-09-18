@@ -1,11 +1,11 @@
 /**
- * 美化管理 Theme Manager v0.6.2
+ * 美化管理 Theme Manager v0.6.4
  *
- * v0.6.2 主要变更：
- *   1. 预览优先克隆真实 #chat + #form_sheld（含父页样式表与 CSS 变量）
- *   2. 无真实消息时回退 v0.6.1 仿真壳
+ * v0.6.4 主要变更：
+ *   1. 编辑预览 = 父页全套酒馆 CSS（link/style）+ 干净聊天 DOM（不克隆当前脏页面）
+ *   2. 缩略图仍用轻量 mock；光标→预览高亮保留
  *
- * v0.6.1：同步 themes 数组、IndexedDB 预览、SmartTheme 变量等
+ * v0.6.4：光标高亮、渐变缩略图回退
  *
  * v0.6.0 主要变更：接入酒馆原生主题字段、导入导出、删除防复活等
  */
@@ -416,52 +416,101 @@
         `<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96"><rect width="96" height="96" fill="${color}"/><text x="48" y="60" font-size="34" text-anchor="middle" fill="#fff" font-family="sans-serif">${ch}</text></svg>`);
     const AV_CHAR = AV("S", "#5b6ee1");
     const AV_USER = AV("你", "#3f78bc");
+    /* 纯净预览沙盒：仅内联基础样式 + 主题 CSS，不引用父页任何样式表/DOM */
     const BASE_CSS = `
-	*{box-sizing:border-box} html,body{height:100%;margin:0}
-	body{display:flex;flex-direction:column;font:15px/1.65 system-ui,"Segoe UI","Microsoft YaHei",sans-serif;
-	  background:var(--SmartThemeBlurTintColor,#181825);
-	  color:var(--SmartThemeBodyColor,#e6e6ef);
-	  font-size:calc(15px * var(--SmartThemeFontScale,1))}
-	#top-bar{display:flex;justify-content:space-between;align-items:center;padding:8px 12px;
-	  background:rgba(0,0,0,.28);border-bottom:1px solid var(--SmartThemeBorderColor,rgba(255,255,255,.08));font-size:14px}
-	#site-logo{font-size:13px;opacity:.75;letter-spacing:.5px}
-	#top-bar-icons span{margin-left:10px;cursor:default;opacity:.7}
+	*{box-sizing:border-box} html,body{height:100%;margin:0;padding:0}
+	body{
+	  display:flex;flex-direction:column;
+	  font:15px/1.65 system-ui,"Segoe UI","Microsoft YaHei",sans-serif;
+	  background:#12121a;
+	  color:#e8e8f0;
+	}
+	/* 中性默认，方便看出主题覆盖效果；主题可用 --SmartTheme* 或自写选择器 */
+	:root{
+	  --SmartThemeBodyColor:#e8e8f0;
+	  --SmartThemeEmColor:#b8e0c8;
+	  --SmartThemeUnderlineColor:#b8e0c8;
+	  --SmartThemeQuoteColor:#e0a86a;
+	  --SmartThemeBlurTintColor:#12121a;
+	  --SmartThemeChatTintColor:transparent;
+	  --SmartThemeUserMesBlurTintColor:rgba(255,255,255,.08);
+	  --SmartThemeBotMesBlurTintColor:rgba(255,255,255,.05);
+	  --SmartThemeBorderColor:rgba(255,255,255,.12);
+	  --SmartThemeShadowColor:rgba(0,0,0,.4);
+	  --SmartThemeFontScale:1;
+	}
+	body{
+	  background:var(--SmartThemeBlurTintColor,#12121a);
+	  color:var(--SmartThemeBodyColor,#e8e8f0);
+	  font-size:calc(15px * var(--SmartThemeFontScale,1));
+	}
 	#sheld{flex:1;display:flex;flex-direction:column;min-height:0;width:100%}
-	#chat{flex:1;overflow-y:auto;padding:10px 12px;display:flex;flex-direction:column;gap:10px;
-	  scrollbar-width:thin;background:var(--SmartThemeChatTintColor,transparent)}
-	.mes{position:relative;display:flex;flex-direction:row;align-items:flex-start;gap:8px;
-	  border:1px solid var(--SmartThemeBorderColor,transparent);border-radius:10px;padding:6px 8px}
-	.mes.is_user{align-self:stretch}
+	#chat{
+	  flex:1;overflow-y:auto;padding:12px 14px;
+	  display:flex;flex-direction:column;gap:12px;
+	  scrollbar-width:thin;
+	  background:var(--SmartThemeChatTintColor,transparent);
+	}
+	.mes{
+	  position:relative;display:flex;flex-direction:row;align-items:flex-start;gap:10px;
+	  border:1px solid var(--SmartThemeBorderColor,transparent);
+	  border-radius:12px;padding:8px 10px;
+	}
 	.mes_block{display:flex;flex-direction:column;gap:4px;flex:1 1 auto;min-width:0}
-	.ch_name{display:flex;justify-content:space-between;align-items:center;
-	  font-weight:600;font-size:.9em;color:var(--SmartThemeQuoteColor,#9ab3ff)}
+	.ch_name{
+	  display:flex;justify-content:space-between;align-items:center;
+	  font-weight:600;font-size:.9em;color:var(--SmartThemeQuoteColor,#9ab3ff);
+	}
 	.mes.is_user .name_text{color:#7bd88f}
-	.mes_buttons{display:flex;gap:8px;opacity:.4;font-size:.85em}
-	.swipe_left,.swipe_right{display:none}
-	.mesAvatarWrapper{flex:0 0 auto;width:48px;height:48px}
-	.avatar{width:48px;height:48px;border-radius:8px;overflow:hidden}
-	.avatar img{width:100%;height:100%;object-fit:cover;display:block;border-radius:8px}
-	.mes_text{padding:8px 12px;border-radius:12px;white-space:pre-wrap;word-break:break-word;
+	.mes_buttons{display:flex;gap:8px;opacity:.35;font-size:.85em}
+	.mesAvatarWrapper{flex:0 0 auto;width:44px;height:44px}
+	.avatar{width:44px;height:44px;border-radius:10px;overflow:hidden}
+	.avatar img{width:100%;height:100%;object-fit:cover;display:block;border-radius:10px}
+	.mes_text{
+	  padding:9px 12px;border-radius:12px;white-space:pre-wrap;word-break:break-word;
 	  background:var(--SmartThemeBotMesBlurTintColor,rgba(255,255,255,.05));
-	  border:1px solid var(--SmartThemeBorderColor,transparent);color:var(--SmartThemeBodyColor,inherit)}
-	.mes.is_user .mes_text{background:var(--SmartThemeUserMesBlurTintColor,rgba(255,255,255,.08))}
+	  border:1px solid var(--SmartThemeBorderColor,transparent);
+	  color:var(--SmartThemeBodyColor,inherit);
+	}
+	.mes.is_user .mes_text{
+	  background:var(--SmartThemeUserMesBlurTintColor,rgba(255,255,255,.08));
+	}
 	.mes_text em{color:var(--SmartThemeEmColor,inherit);font-style:italic}
 	.mes_text u{color:var(--SmartThemeUnderlineColor,inherit);text-decoration:underline}
-	.mes_text q{color:var(--SmartThemeQuoteColor,#f2c078)}
-	#form_sheld{border-top:1px solid var(--SmartThemeBorderColor,rgba(255,255,255,.12));
-	  background:var(--SmartThemeBlurTintColor,rgba(0,0,0,.22));flex-shrink:0}
-	#send_form{display:flex;align-items:flex-end;gap:8px;padding:10px}
-	#leftSendForm{display:flex;align-items:center}
-	#options_button{width:36px;height:36px;display:grid;place-items:center;cursor:default;border-radius:8px;opacity:.7}
-	#send_textarea{flex:1;min-height:38px;max-height:120px;resize:none;padding:8px 12px;border-radius:10px;
-	  border:1px solid var(--SmartThemeBorderColor,rgba(255,255,255,.12));
-	  background:rgba(255,255,255,.06);outline:none;font:inherit;color:inherit}
-	#send_textarea::placeholder{opacity:.45}
+	.mes_text q{color:var(--SmartThemeQuoteColor,#e0a86a)}
+	#form_sheld{
+	  border-top:1px solid var(--SmartThemeBorderColor,rgba(255,255,255,.12));
+	  background:var(--SmartThemeBlurTintColor,rgba(0,0,0,.25));
+	  flex-shrink:0;
+	}
+	#send_form{display:flex;align-items:flex-end;gap:8px;padding:10px 12px}
+	#options_button{
+	  width:36px;height:36px;display:grid;place-items:center;
+	  border-radius:8px;opacity:.55;font-size:14px;
+	}
+	#send_textarea{
+	  flex:1;min-height:38px;max-height:100px;resize:none;padding:8px 12px;
+	  border-radius:12px;border:1px solid var(--SmartThemeBorderColor,rgba(255,255,255,.12));
+	  background:rgba(255,255,255,.06);outline:none;font:inherit;color:inherit;
+	}
+	#send_textarea::placeholder{opacity:.4}
 	#rightSendForm{display:flex;gap:6px;align-items:center}
-	#send_but{width:40px;height:40px;display:grid;place-items:center;border-radius:50%;
-	  background:var(--SmartThemeQuoteColor,#5b6ee1);color:#fff;font-size:16px}
+	#send_but{
+	  width:40px;height:40px;display:grid;place-items:center;border-radius:50%;
+	  background:var(--SmartThemeQuoteColor,#5b6ee1);color:#fff;font-size:15px;
+	}
 	#mes_stop{display:none}
-	.tm-hint{text-align:center;font-size:11px;opacity:.4;padding:6px 0 2px}
+	.tm-sandbox-tag{
+	  flex-shrink:0;text-align:center;font-size:10px;letter-spacing:.04em;
+	  padding:4px 8px;opacity:.4;
+	  border-bottom:1px solid var(--SmartThemeBorderColor,rgba(255,255,255,.06));
+	}
+	.tm-hint{text-align:center;font-size:11px;opacity:.35;padding:8px 0 4px}
+	.tm-hl{
+	  outline:2px solid #ff6b6b !important;
+	  box-shadow:0 0 0 4px rgba(255,107,107,.35) !important;
+	  transition:outline .15s,box-shadow .15s;
+	}
 	`;
     function buildMockChatHTML({ msgCount = 3, themeCss = "" } = {}) {
         const msgs = [];
@@ -473,39 +522,38 @@
 	<div class="mesAvatarWrapper"><div class="avatar"><img src="${isUser ? AV_USER : AV_CHAR}" alt=""></div></div>
 	<div class="mes_block">
 	<div class="ch_name"><span class="name_text">${isUser ? "你" : name}</span>
-	<div class="mes_buttons"><span class="mes_button mes_edit" title="编辑">✏️</span><span class="mes_button mes_copy" title="复制">⧉</span></div></div>
+	<div class="mes_buttons"><span class="mes_button mes_edit">✏️</span><span class="mes_button mes_copy">⧉</span></div></div>
 	<div class="mes_text">${text}</div>
 	</div>
 	</div>`);
         }
         const safeCss = String(themeCss).replace(/<\/(style|script)/gi, "<\\/$1");
+        // 纯净沙盒：只有两段 style（基础 + 主题），无外链、无父页克隆
         return `<!DOCTYPE html>
-	<html xmlns="http://www.w3.org/1999/xhtml" lang="zh-CN">
-	<head>
-	<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-	<style id="tm-mock-base">${BASE_CSS}</style>
-	<style id="tm-preview-style">${safeCss}</style>
-	</head>
-	<body>
-	<div id="top-bar">
-	<div id="nav-toggle" title="菜单">☰</div>
-	<div id="site-logo">SillyTavern · 模拟预览</div>
-	<div id="top-bar-icons"><span title="Wand">🪄</span><span title="设置">⚙️</span></div>
-	</div>
-	<div id="sheld"><div id="chat">${msgs.join("")}
-	<div class="tm-hint">— 模拟对话（${msgCount} 条）· 一切以真实应用为准 —</div>
-	</div></div>
-	<div id="form_sheld">
-	<div id="send_form">
-	<div id="leftSendForm"><div id="options_button" title="选项">☰</div></div>
-	<textarea id="send_textarea" placeholder="在此输入消息…" rows="1" readonly></textarea>
-	<div id="rightSendForm">
-	<div id="mes_stop" title="停止">■</div>
-	<div id="send_but" title="发送">➤</div>
-	</div>
-	</div>
-	</div>
-	</body></html>`;
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style id="tm-mock-base">${BASE_CSS}</style>
+<style id="tm-preview-style">${safeCss}</style>
+</head>
+<body>
+<div class="tm-sandbox-tag">纯净预览沙盒 · 不克隆页面</div>
+<div id="sheld">
+  <div id="chat">
+    ${msgs.join("\n")}
+    <div class="tm-hint">— ${msgCount} 条示例 · 仅用于调样式 —</div>
+  </div>
+</div>
+<div id="form_sheld">
+  <div id="send_form">
+    <div id="leftSendForm"><div id="options_button">☰</div></div>
+    <textarea id="send_textarea" placeholder="在此输入消息…" rows="1" readonly></textarea>
+    <div id="rightSendForm"><div id="send_but">➤</div></div>
+  </div>
+</div>
+</body>
+</html>`;
     }
 
     /* ================================================================
@@ -549,24 +597,29 @@
     }
     function collectParentStylesHtml() {
         const parts = [];
-        // srcdoc 的 base 是 about:srcdoc，必须把 href 收成绝对 URL
-        document.querySelectorAll('link[rel="stylesheet"]').forEach(link => {
-            const raw = link.getAttribute("href");
+        const seen = new Set();
+        const pushLink = (raw) => {
             if (!raw || raw.startsWith("blob:")) return;
-            if (/Theme-Manager|theme-manager|st_theme_manager/i.test(raw)) return;
+            if (/Theme-Manager|theme-manager|st_theme_manager|tm_panel/i.test(raw)) return;
             let abs = raw;
-            try { abs = new URL(raw, location.href).href; } catch { /* keep raw */ }
+            try { abs = new URL(raw, location.href).href; } catch { /* keep */ }
+            if (seen.has(abs)) return;
+            seen.add(abs);
             parts.push(`<link rel="stylesheet" href="${abs.replace(/"/g, "&quot;")}">`);
+        };
+        document.querySelectorAll('link[rel="stylesheet"]').forEach(link => {
+            pushLink(link.getAttribute("href"));
         });
-        // 内联 style：保留酒馆 custom-style，跳过本扩展注入
+        if (parts.length < 2) {
+            ["/style.css", "/css/st-tailwind.css", "/css/mobile-styles.css",
+             "/css/toggle-dependent.css", "/css/animations.css"].forEach(pushLink);
+        }
         document.querySelectorAll("style").forEach(st => {
             if (st.hasAttribute("data-theme-id")) return;
-            if (st.id === "tm-mock-base" || st.id === "tm-preview-style" || st.id === "tm-clone-rootvars" || st.id === "tm-clone-layout") return;
+            if (/^tm-/i.test(st.id || "")) return;
             const css = st.textContent || "";
-            if (!css.trim()) return;
+            if (!css.trim() || css.length > 400000) return;
             if (css.includes("#tm_panel") || css.includes("#tm_edit")) return;
-            // 体积保护：单块超过 400KB 跳过（避免把巨型注入塞进 srcdoc）
-            if (css.length > 400000) return;
             parts.push(`<style>${css.replace(/<\/(style)/gi, "<\\/$1")}</style>`);
         });
         return parts.join("\n");
@@ -603,64 +656,85 @@
         const keep = new Set(mes.slice(-msgCount));
         mes.forEach(el => { if (!keep.has(el)) el.remove(); });
     }
-    function buildCloneChatHTML({ msgCount = 3, themeCss = "" } = {}) {
-        const liveChat = document.getElementById("chat");
-        const liveForm = document.getElementById("form_sheld");
-        const hasMes = liveChat && liveChat.querySelector(".mes");
-        if (!hasMes || !liveForm) {
-            // 没有真实对话时回退模拟壳
-            return buildMockChatHTML({ msgCount, themeCss });
+    function buildPureTavernPreviewHTML({ msgCount = 3, themeCss = "" } = {}) {
+        const msgs = [];
+        for (let i = 0; i < msgCount; i++) {
+            const [who, body, name] = CHAT[i % CHAT.length];
+            const isUser = who === "user";
+            msgs.push(
+`<div class="mes ${isUser ? "is_user" : ""}${i === 0 ? " first_mes" : ""}${i === msgCount - 1 ? " last_mes" : ""}" mesid="${i}" is_user="${isUser}" ch_name="${isUser ? "你" : (name || "Seraphina")}">
+  <div class="mesAvatarWrapper"><div class="avatar"><img src="${isUser ? AV_USER : AV_CHAR}" alt=""></div></div>
+  <div class="mes_block">
+    <div class="ch_name">
+      <span class="name_text">${isUser ? "你" : (name || "Seraphina")}</span>
+      <div class="mes_buttons"><div class="extraMesButtons">
+        <div class="mes_edit mes_button" title="编辑">✏️</div>
+        <div class="mes_copy mes_button" title="复制">⧉</div>
+      </div></div>
+    </div>
+    <div class="mes_text">${body}</div>
+  </div>
+</div>`);
         }
-        const chatClone = sanitizeClone(liveChat);
-        const formClone = sanitizeClone(liveForm);
-        limitChatMessages(chatClone, msgCount);
-        // 标记预览来源
-        chatClone.insertAdjacentHTML("beforeend",
-            `<div class="tm-hint" style="text-align:center;font-size:11px;opacity:.45;padding:8px 0;">— 真实 DOM 克隆（${msgCount} 条）· 一切以真实应用为准 —</div>`);
-
+        const styles = collectParentStylesHtml();
         const rootVars = collectRootCssVars();
-        const parentStyles = collectParentStylesHtml();
         const safeCss = String(themeCss).replace(/<\/(style|script)/gi, "<\\/$1");
-        const chatHtml = chatClone.outerHTML;
-        const formHtml = formClone.outerHTML;
-
+        const layoutFallback = `
+html, body { height: 100%; margin: 0; }
+body {
+  display: flex; flex-direction: column;
+  background: var(--SmartThemeBlurTintColor, #181825);
+  color: var(--SmartThemeBodyColor, #e6e6ef);
+  font-family: system-ui, "Segoe UI", "Microsoft YaHei", sans-serif;
+  overflow: hidden;
+}
+#sheld { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0; width: 100%; }
+#chat { flex: 1 1 auto; overflow-y: auto; min-height: 0; }
+#form_sheld, #send_form { flex: 0 0 auto; }
+.tm-hint { text-align: center; font-size: 11px; opacity: .45; padding: 8px; }
+.tm-hl { outline: 2px solid #ff6b6b !important; box-shadow: 0 0 0 4px rgba(255,107,107,.35) !important; }
+`;
         return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-${parentStyles}
+<base href="${String(location.href).replace(/"/g, "&quot;")}">
+${styles}
 <style id="tm-clone-rootvars">${rootVars}</style>
-<style id="tm-clone-layout">
-  html, body { height: 100%; margin: 0; }
-  body {
-    display: flex; flex-direction: column; min-height: 100%;
-    background: var(--SmartThemeBlurTintColor, #181825);
-    color: var(--SmartThemeBodyColor, #eee);
-    overflow: hidden;
-  }
-  #tm-clone-wrap {
-    flex: 1; display: flex; flex-direction: column; min-height: 0; width: 100%;
-  }
-  #chat {
-    flex: 1 1 auto; min-height: 0; overflow-y: auto !important;
-    max-height: none !important;
-  }
-  #form_sheld { flex: 0 0 auto; }
-  /* 预览内隐藏易干扰元素 */
-  #rm_button_panel, #top-bar, #top-settings-holder, #extensionsMenu,
-  .drawer, #left-nav-panel, #right-nav-panel { display: none !important; }
-</style>
+<style id="tm-pure-layout">${layoutFallback}</style>
 <style id="tm-preview-style">${safeCss}</style>
 </head>
-<body class="${document.body.className || ""}">
-<div id="tm-clone-wrap">
-${chatHtml}
-${formHtml}
+<body class="${(document.body && document.body.className) || ""}">
+<div id="top-bar">
+  <div id="nav-toggle">☰</div>
+  <div id="site-logo">SillyTavern · 纯净 CSS 预览</div>
+  <div id="top-bar-icons"><span>⚙️</span></div>
+</div>
+<div id="sheld">
+  <div id="chat">
+    ${msgs.join("\n")}
+    <div class="tm-hint">— 父页全套 CSS + 干净 DOM（${msgCount} 条）· 非页面克隆 —</div>
+  </div>
+  <div id="form_sheld">
+    <div id="send_form">
+      <div id="leftSendForm"><div id="options_button">☰</div></div>
+      <textarea id="send_textarea" rows="1" placeholder="在此输入消息…" readonly></textarea>
+      <div id="rightSendForm">
+        <div id="mes_stop">■</div>
+        <div id="send_but">➤</div>
+      </div>
+    </div>
+  </div>
 </div>
 </body>
 </html>`;
     }
+    function buildCloneChatHTML(opts) {
+        // 保留兼容名：编辑场景请用 pure，不再克隆脏 DOM
+        return buildPureTavernPreviewHTML(opts);
+    }
+
 
     const DEVICES = {
         mobile:    { w: 390,  h: 720, icon: "📱", label: "手机" },
@@ -669,10 +743,13 @@ ${formHtml}
         pc:        { w: 1920, h: 940, icon: "🖥", label: "PC" },
     };
     class PreviewManager {
-        constructor($root, { msgCount = 3, device = "mobile", onCapture = null } = {}) {
+        constructor($root, { msgCount = 3, device = "mobile", onCapture = null, mode = "pure" } = {}) {
             this.$root = $root; this.msgCount = msgCount; this.device = device; this.css = "";
-            this.onCapture = onCapture; this._built = false;
+            this.onCapture = onCapture;
+            this.mode = (mode === "mock" || mode === "clone" || mode === "pure") ? mode : "pure";
+            this._built = false;
             this._onWinResize = () => this.relayout();
+            this._hlTimer = null;
         }
         mount() {
             if (this._built) return; this._built = true;
@@ -687,7 +764,7 @@ ${formHtml}
 	      <option value="3">3 条</option><option value="20">20 条</option>
 	    </select>
 	    <button class="menu_button tm-refresh" title="手动刷新预览">🔄</button>
-	    <button class="menu_button tm-capture" title="生成预览图（入库展示 / 分享用）">📸</button>
+	    <button class="menu_button tm-capture" title="生成预览图">📸</button>
 	  </div>
 	</div>
 	<div class="tm-prev-stage"><div class="tm-prev-framebox"><iframe class="tm-prev-frame" sandbox="allow-same-origin"></iframe></div></div>`);
@@ -722,21 +799,51 @@ ${formHtml}
             if (!this.$frame) return;
             const frame = this.$frame[0];
             frame.onload = () => { this.setCss(this.css); this.relayout(); };
-            // 优先克隆真实 #chat + #form_sheld；无消息时回退模拟壳
-            frame.srcdoc = buildCloneChatHTML({ msgCount: this.msgCount, themeCss: this.css });
+            // pure：父页全套 CSS + 干净聊天 DOM（编辑默认）
+            // mock：仅内置 BASE_CSS（缩略图等轻量场景）
+            const html = this.mode === "mock"
+                ? buildMockChatHTML({ msgCount: this.msgCount, themeCss: this.css })
+                : buildPureTavernPreviewHTML({ msgCount: this.msgCount, themeCss: this.css });
+            frame.srcdoc = html;
         }
         setCss(css) {
             this.css = css;
             const el = this.$frame?.[0]?.contentDocument?.getElementById?.("tm-preview-style");
             if (el) el.textContent = css;
+            else if (this.$frame?.[0] && !this.$frame[0].srcdoc) this.rebuild();
         }
-        destroy() { $(window).off("resize", this._onWinResize); }
+        /** 根据选择器列表在预览里高亮并滚到可见 */
+        highlightSelectors(selectors) {
+            const doc = this.$frame?.[0]?.contentDocument;
+            if (!doc?.body) return;
+            doc.querySelectorAll(".tm-hl").forEach(el => el.classList.remove("tm-hl"));
+            if (!selectors?.length) return;
+            let first = null;
+            for (const sel of selectors) {
+                let list;
+                try { list = doc.querySelectorAll(sel); } catch { continue; }
+                list.forEach(el => {
+                    el.classList.add("tm-hl");
+                    if (!first) first = el;
+                });
+            }
+            if (first) {
+                try { first.scrollIntoView({ block: "nearest", behavior: "smooth" }); } catch { /* ignore */ }
+            }
+            clearTimeout(this._hlTimer);
+            this._hlTimer = setTimeout(() => {
+                doc.querySelectorAll(".tm-hl").forEach(el => el.classList.remove("tm-hl"));
+            }, 1600);
+        }
+        destroy() { $(window).off("resize", this._onWinResize); clearTimeout(this._hlTimer); }
         async capturePng(maxW = 640) {
-            const doc = this.$frame[0].contentDocument;
+            const doc = this.$frame?.[0]?.contentDocument;
             if (!doc?.body) throw new Error("预览尚未就绪，请先刷新再试");
             const d = DEVICES[this.device];
             const html = doc.documentElement.cloneNode(true);
-            html.querySelectorAll(".tm-hint").forEach(el => el.remove());
+            html.querySelectorAll(".tm-hint, .tm-hl").forEach(el => el.remove());
+            // 去掉外链 stylesheet，避免 foreignObject 跨域失败（仿真壳本身内联足够）
+            html.querySelectorAll('link[rel="stylesheet"]').forEach(el => el.remove());
             const xhtml = new XMLSerializer().serializeToString(html);
             const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${d.w}" height="${d.h}"><foreignObject width="100%" height="100%">${xhtml}</foreignObject></svg>`;
             const url = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml;charset=utf-8" }));
@@ -744,7 +851,7 @@ ${formHtml}
                 const img = new Image();
                 await new Promise((ok, err) => {
                     img.onload = ok;
-                    img.onerror = () => err(new Error("生成失败：快照不支持外链图片/字体"));
+                    img.onerror = () => err(new Error("snapshot_fail"));
                     img.src = url;
                 });
                 const s = Math.min(1, maxW / d.w);
@@ -754,6 +861,55 @@ ${formHtml}
                 return cv.toDataURL("image/png");
             } finally { URL.revokeObjectURL(url); }
         }
+    }
+
+    /** 从光标位置解析当前 CSS 规则的选择器列表 */
+    function selectorsAtCursor(css, index) {
+        if (!css || index < 0) return [];
+        // 落到最近的 { 前
+        let i = Math.min(index, css.length - 1);
+        while (i > 0 && css[i] !== "{") {
+            if (css[i] === "}" && i < index) break;
+            i--;
+        }
+        if (css[i] !== "{") return [];
+        // 从 { 往前找到上一个 } 或开头
+        let j = i - 1;
+        while (j >= 0 && css[j] !== "}") j--;
+        let raw = css.slice(j + 1, i);
+        raw = raw.replace(/\/\*[\s\S]*?\*\//g, "").trim();
+        if (!raw) return [];
+        // 去掉 @media 等 at-rule 外壳：取最后一段选择器
+        if (raw.includes("{")) {
+            const last = raw.lastIndexOf("{");
+            raw = raw.slice(last + 1).trim();
+        }
+        return raw.split(",")
+            .map(s => s.replace(/::?(before|after|hover|focus|active|root)/gi, "").trim())
+            .map(s => s.replace(/:not\([^)]*\)/g, "").trim())
+            .filter(s => s && !s.startsWith("@") && s.length < 120);
+    }
+
+    /** 截图失败时用主题色生成渐变缩略图 */
+    function gradientPreviewDataUrl(css, w = 360, h = 240) {
+        const cols = [...String(css).matchAll(/#[0-9a-fA-F]{3,8}\b|rgba?\([^)]+\)/g)].map(m => m[0]).slice(0, 3);
+        const c1 = cols[0] || "#1b1b2f";
+        const c2 = cols[1] || "#16213e";
+        const c3 = cols[2] || "#0f3460";
+        const cv = document.createElement("canvas");
+        cv.width = w; cv.height = h;
+        const ctx = cv.getContext("2d");
+        const g = ctx.createLinearGradient(0, 0, w, h);
+        g.addColorStop(0, c1); g.addColorStop(0.55, c2); g.addColorStop(1, c3);
+        ctx.fillStyle = g; ctx.fillRect(0, 0, w, h);
+        ctx.fillStyle = "rgba(255,255,255,.12)";
+        ctx.fillRect(24, 40, w - 48, 44);
+        ctx.fillRect(24, 100, w - 80, 36);
+        ctx.fillRect(24, 150, w - 64, 36);
+        ctx.fillStyle = "rgba(255,255,255,.35)";
+        ctx.font = "12px sans-serif";
+        ctx.fillText("Theme preview", 28, 28);
+        return cv.toDataURL("image/png");
     }
 
     /* ================================================================
@@ -919,7 +1075,7 @@ ${formHtml}
         }
         return out.replace(/\n[ \t]+(?=\n)/g, "\n").trim() + "\n";
     }
-    async function createEditor(container, { value = "", onChange = null, onSave = null } = {}) {
+    async function createEditor(container, { value = "", onChange = null, onSave = null, onCursor = null } = {}) {
         try {
             await ensureCodeMirror();
             const cm = CodeMirror(container, {
@@ -935,6 +1091,17 @@ ${formHtml}
                 },
             });
             if (onChange) cm.on("change", () => onChange(cm.getValue()));
+            let cursorTimer = null;
+            const emitCursor = () => {
+                if (!onCursor) return;
+                clearTimeout(cursorTimer);
+                cursorTimer = setTimeout(() => {
+                    const pos = cm.indexFromPos(cm.getCursor());
+                    onCursor(cm.getValue(), pos);
+                }, 120);
+            };
+            cm.on("cursorActivity", emitCursor);
+            cm.on("mousedown", emitCursor);
             return {
                 kind: "codemirror",
                 getValue: () => cm.getValue(),
@@ -942,6 +1109,7 @@ ${formHtml}
                 focus: () => cm.focus(),
                 refresh: () => cm.refresh(),
                 format: () => { const p = cm.getCursor(); cm.setValue(formatCss(cm.getValue())); cm.setCursor(p); },
+                getCursorIndex: () => cm.indexFromPos(cm.getCursor()),
             };
         }
         catch (e) {
@@ -951,11 +1119,14 @@ ${formHtml}
             ta.className = "tm-plain-editor"; ta.value = value; ta.spellcheck = false;
             container.appendChild(ta);
             ta.addEventListener("input", () => onChange?.(ta.value));
+            ta.addEventListener("click", () => onCursor?.(ta.value, ta.selectionStart));
+            ta.addEventListener("keyup", () => onCursor?.(ta.value, ta.selectionStart));
             return {
                 kind: "textarea",
                 getValue: () => ta.value, setValue: v => ta.value = v,
                 focus: () => ta.focus(), refresh: () => {},
                 format: () => { ta.value = formatCss(ta.value); onChange?.(ta.value); },
+                getCursorIndex: () => ta.selectionStart || 0,
             };
         }
     }
@@ -1100,6 +1271,7 @@ ${formHtml}
             const cached = await hydratePreview(id);
             if (cached) return true;
         }
+        const css = buildActiveCss(t, S().toggles[id]);
         let $host = $("#tm_autoprev");
         if (!$host.length) {
             $host = $("<div>", { id: "tm_autoprev", "aria-hidden": "true" }).css({
@@ -1107,26 +1279,33 @@ ${formHtml}
                 opacity: 0, pointerEvents: "none", zIndex: -1,
             }).appendTo("body");
         }
-        const pm = new PreviewManager($host.empty(), { msgCount: 3, device: "mobile" });
+        const pm = new PreviewManager($host.empty(), { msgCount: 3, device: "mobile", mode: "mock" });
         try {
             pm.mount();
-            pm.css = buildActiveCss(t, S().toggles[id]);
+            pm.css = css;
             pm.rebuild();
             await new Promise(resolve => {
                 const t0 = Date.now();
                 const tick = () => {
                     const doc = pm.$frame?.[0]?.contentDocument;
-                    if ((doc?.body && doc.readyState === "complete") || Date.now() - t0 > 6000) resolve();
-                    else setTimeout(tick, 60);
+                    if ((doc?.body && doc.readyState === "complete") || Date.now() - t0 > 4000) resolve();
+                    else setTimeout(tick, 50);
                 };
                 tick();
             });
-            await new Promise(r => setTimeout(r, 150));
-            // 限制尺寸，避免 dataURL 过大
-            const png = await pm.capturePng(360);
-            await setPreview(id, png); // 只写 IndexedDB + 内存，不碰 settings
+            await new Promise(r => setTimeout(r, 120));
+            let png;
+            try { png = await pm.capturePng(360); }
+            catch { png = gradientPreviewDataUrl(css, 360, 240); }
+            await setPreview(id, png);
             return true;
-        } catch (e) { console.warn("[美化管理] 预览图生成失败：", t?.name, e); return false; }
+        } catch (e) {
+            console.warn("[美化管理] 预览图生成失败，使用渐变占位：", t?.name, e);
+            try {
+                await setPreview(id, gradientPreviewDataUrl(css, 360, 240));
+                return true;
+            } catch { return false; }
+        }
         finally { pm.destroy(); $host.empty(); }
     }
 
@@ -1264,21 +1443,32 @@ ${formHtml}
                     ED.liveTimer = setTimeout(() => ED.preview?.setCss(v), 300);
                 },
                 onSave: () => saveEditor(),
+                onCursor: (css, index) => {
+                    const sels = selectorsAtCursor(css, index);
+                    if (sels.length) ED.preview?.highlightSelectors(sels);
+                },
             });
+            // 编辑器固定仿真壳（TauriTavern / 欢迎页没有标准聊天 DOM）
             ED.preview = new PreviewManager($("#tm_edit_prev"), {
+                mode: "pure",
+                msgCount: 3,
+                device: "mobile",
                 onCapture: async () => {
                     try {
-                        const url = await ED.preview.capturePng(360);
+                        let url;
+                        try { url = await ED.preview.capturePng(360); }
+                        catch { url = gradientPreviewDataUrl(ED.editor.getValue(), 360, 240); }
                         if (S().themes[ED.themeId]) { await setPreview(ED.themeId, url); renderList(); }
-                        toastr.success("预览图已生成并保存到主题");
-                    } catch (e) { toastr.error(e.message); }
+                        toastr.success("预览图已保存（IndexedDB）");
+                    } catch (e) { toastr.error(e.message || "生成失败"); }
                 },
             });
             ED.preview.mount();
         }
         ED.editor.setValue(t.rawCss);
         ED.dirty = false;
-        ED.preview.setCss(t.rawCss);
+        ED.preview.css = t.rawCss;
+        ED.preview.rebuild(); // 确保仿真壳带上当前 CSS
         $("#tm_edit").removeClass("tm-hidden");
         requestAnimationFrame(() => { ED.editor.refresh(); ED.preview.relayout(); });
         ED.editor.focus();
@@ -1451,15 +1641,19 @@ ${formHtml}
         refreshAll();
         if (event_types?.CHAT_CHANGED) eventSource.on(event_types.CHAT_CHANGED, () => { refreshAll(); sentinel(); });
         if (event_types?.CHARACTER_MESSAGE_RENDERED) eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, sentinel);
-        // 启动仅静默导入主题元数据（不生成预览、不阻塞）
+        // 启动静默导入；后台最多补 6 张缺失缩略图（仿真/渐变，不写 settings）
         (async () => {
             try {
                 const ids = await syncTavernThemes({ manual: false });
-                if (ids.length) {
-                    console.info(`[美化管理] 已自动导入酒馆主题 ${ids.length} 个（预览按需生成）`);
+                if (ids.length) console.info(`[美化管理] 已自动导入酒馆主题 ${ids.length} 个`);
+                renderList();
+                const need = Object.keys(S().themes).filter(id => !getPreviewSync(id)).slice(0, 6);
+                for (const id of need) {
+                    await generatePreview(id);
                     renderList();
+                    await new Promise(r => setTimeout(r, 80));
                 }
-            } catch (e) { console.warn("[美化管理] 酒馆主题自动导入失败", e); }
+            } catch (e) { console.warn("[美化管理] 启动同步/预览失败", e); }
         })();
     }
     jQuery(boot);
