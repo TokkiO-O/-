@@ -1,11 +1,11 @@
 /**
- * 美化管理 Theme Manager v0.6.7
+ * 美化管理 Theme Manager v0.6.8
  *
- * v0.6.7 主要变更：
- *   1. 修复「编辑」打不开：先显示编辑屏再初始化编辑器，失败有提示
- *   2. 修复「…」菜单闪退：卡片补回 .tm-menu，点击停止冒泡
+ * v0.6.8 主要变更：
+ *   1. 编辑预览改为真实酒馆 1:1：草稿 CSS 注入页面，侧栏编辑不挡主界面
+ *   2. 可在欢迎/聊天/角色/扩展等真实页面上直接看主题效果
  *
- * v0.6.7：光标高亮、渐变缩略图回退
+ * v0.6.8：光标高亮、渐变缩略图回退
  *
  * v0.6.0 主要变更：接入酒馆原生主题字段、导入导出、删除防复活等
  */
@@ -93,6 +93,8 @@
         sortBy: "updated", search: "", tagFilter: "", favOnly: false,
         tavernDeleted: [], tavernPrevTheme: "",   // ★ 已删除的酒馆主题名（防自动同步复活）/ 原生切换前的主题名
     };
+
+    const ED = { themeId: null, editor: null, preview: null, built: false, dirty: false, liveTimer: null };
     function loadSettings() {
         if (!extension_settings[EXT]) extension_settings[EXT] = clone(DEFAULTS);
         for (const k of Object.keys(DEFAULTS)) if (S()[k] === undefined) S()[k] = clone(DEFAULTS[k]);
@@ -203,7 +205,32 @@
             if (!S().activeIds.includes(el.getAttribute("data-theme-id"))) el.remove();
         });
         S().activeIds = S().activeIds.filter(id => S().themes[id]);
-        for (const id of S().activeIds) applyTheme(S().themes[id]);
+        for (const id of S().activeIds) {
+            // 正在编辑的主题改由 #tm_live_preview 接管，避免双份
+            if (ED.themeId && id === ED.themeId && !$("#tm_edit").hasClass("tm-hidden")) continue;
+            applyTheme(S().themes[id]);
+        }
+    }
+    /** 编辑中：把草稿 CSS 打到真实酒馆页面（1:1） */
+    function setLivePreviewCss(css) {
+        let el = document.getElementById("tm_live_preview");
+        if (!el) {
+            el = document.createElement("style");
+            el.id = "tm_live_preview";
+            el.setAttribute("data-tm-live", "1");
+            document.head.appendChild(el);
+        }
+        el.textContent = String(css || "");
+        // 去掉该主题静态注入，避免和草稿叠两层
+        if (ED.themeId) {
+            try {
+                document.head.querySelector(`style[data-theme-id="${CSS.escape(ED.themeId)}"]`)?.remove();
+            } catch { /* */ }
+        }
+    }
+    function clearLivePreview() {
+        document.getElementById("tm_live_preview")?.remove();
+        ED.themeId = ED.themeId; // keep id for refresh during close sequence
     }
     function enableTheme(id) {
         const t = S().themes[id]; if (!t) return;
@@ -931,6 +958,7 @@ body.tm-sandbox {
 	    ${Object.entries(DEVICES).map(([k, d]) =>
 	        `<button class="menu_button tm-dev" data-dev="${k}" title="${d.w} × ${d.h}">${d.icon}${d.label}</button>`).join("")}
 	  </div>
+	  <div class="tm-live-banner">🖥️ 主预览＝真实酒馆（可点欢迎/聊天/角色/扩展）· 下方为可选沙盒对照</div>
 	  <div class="tm-prev-scenes">
 	    <button class="menu_button tm-scene tm-on" data-scene="chat">聊天</button>
 	    <button class="menu_button tm-scene" data-scene="welcome">欢迎</button>
@@ -1659,7 +1687,6 @@ body.tm-sandbox {
     }
 
     /* ---------- M2+M3.1 编辑屏 ---------- */
-    const ED = { themeId: null, editor: null, preview: null, built: false, dirty: false, liveTimer: null };
     async function openEditor(themeId) {
         try {
             if (ED.dirty && !confirm("当前编辑有未保存改动，仍要切换主题？")) return;
@@ -1682,7 +1709,10 @@ body.tm-sandbox {
                         onChange: v => {
                             ED.dirty = true;
                             clearTimeout(ED.liveTimer);
-                            ED.liveTimer = setTimeout(() => ED.preview?.setCss(v), 300);
+                            ED.liveTimer = setTimeout(() => {
+                                setLivePreviewCss(v);
+                                ED.preview?.setCss(v);
+                            }, 300);
                         },
                         onSave: () => saveEditor(),
                         onCursor: (css, index) => {
@@ -1716,10 +1746,17 @@ body.tm-sandbox {
             const css = String(t.rawCss || "");
             ED.editor.setValue(css);
             ED.dirty = false;
+            // 1:1 真实页面预览
+            setLivePreviewCss(css);
+            refreshAll();
             if (ED.preview) {
                 ED.preview.css = css;
                 ED.preview.rebuild();
             }
+            // 缩小库面板，露出真实酒馆
+            $("#tm_panel").addClass("tm-hidden");
+            $("#tm_edit").removeClass("tm-hidden").addClass("tm-live-dock");
+            window.toastr?.info?.("已在真实酒馆预览（左侧/背后即效果）。改代码约 300ms 同步。");
             requestAnimationFrame(() => {
                 try { ED.editor.refresh(); } catch { /* */ }
                 try { ED.preview?.relayout(); } catch { /* */ }
@@ -1732,7 +1769,12 @@ body.tm-sandbox {
     }
     function closeEditor() {
         if (ED.dirty && !confirm("有未保存改动，仍要离开编辑器？")) return;
-        $("#tm_edit").addClass("tm-hidden");
+        clearLivePreview();
+        ED.themeId = null;
+        $("#tm_edit").addClass("tm-hidden").removeClass("tm-live-dock");
+        $("#tm_panel").removeClass("tm-hidden");
+        refreshAll();
+        renderList();
     }
     function saveEditor() {
         const t = S().themes[ED.themeId]; if (!t) return;
@@ -1749,6 +1791,8 @@ body.tm-sandbox {
         const tog = S().toggles[t.id] || {};
         for (const k of Object.keys(tog)) if (!(k in t.blocks)) delete tog[k];
         saveSettingsDebounced();
+        setLivePreviewCss(css);
+        refreshAll();
         if (S().activeIds.includes(t.id)) { refreshAll(); applyTavernNative(t.id); }
         renderList();
         ED.dirty = false;
@@ -1796,7 +1840,7 @@ body.tm-sandbox {
 	      <div class="tm-edit-head">
 	        <button id="tm_edit_back" class="menu_button">← 返回库</button>
 	        <input id="tm_edit_name" class="text_pole" placeholder="主题名称">
-	        <span class="tm-edit-info">左：代码 · 右：实时预览（≈300ms）｜ Ctrl+S 保存 · Ctrl+F 搜索 · Shift+Ctrl+F 替换</span>
+	        <span class="tm-edit-info">真实酒馆 1:1 预览（改代码≈300ms 同步到页面）｜ Ctrl+S 保存 · Esc 返回</span>
 	        <button id="tm_edit_format" class="menu_button" title="一键格式化">🧹 格式化</button>
 	        <button id="tm_edit_save" class="menu_button">💾 保存</button>
 	      </div>
