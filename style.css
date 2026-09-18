@@ -84,3 +84,9 @@
 	  #tm_edit_code, #tm_edit_prev { flex: 1 1 auto; min-height: 40%; }
 	  #tm_list[data-view="grid"] { grid-template-columns: 1fr; }
 	}
+
+/* ============ v0.6：删除按钮 / 酒馆徽标 / 离屏预览宿主 ============ */
+.tm-actions .tm-del { margin-left: auto; color: #ff9b9b; }
+.tm-actions .tm-del:hover { background: rgba(255,80,80,.18); color: #ff7b7b; }
+.tm-badge-scope { color: #9ab3ff; }
+#tm_autoprev { position: fixed; left: -99999px; top: 0; opacity: 0; pointer-events: none; }
