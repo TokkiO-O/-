@@ -1,11 +1,12 @@
 /**
- * 美化管理 Theme Manager v0.6.4
+ * 美化管理 Theme Manager v0.6.5
  *
- * v0.6.4 主要变更：
- *   1. 编辑预览 = 父页全套酒馆 CSS（link/style）+ 干净聊天 DOM（不克隆当前脏页面）
- *   2. 缩略图仍用轻量 mock；光标→预览高亮保留
+ * v0.6.5 主要变更：
+ *   1. 编辑预览改为「多页面纯净壳」（聊天/欢迎/角色/扩展 + 顶栏/侧栏）
+ *      用 CSS 变量 + 主题，不再注入整页外链以免半高错位
+ *   2. 列表缺失缩略图自动后台生成；布局高度链加固
  *
- * v0.6.4：光标高亮、渐变缩略图回退
+ * v0.6.5：光标高亮、渐变缩略图回退
  *
  * v0.6.0 主要变更：接入酒馆原生主题字段、导入导出、删除防复活等
  */
@@ -401,11 +402,11 @@
      * M2 预览系统：优先克隆真实 #chat + #form_sheld，否则仿真壳
      * ================================================================ */
     const CHAT = [
-        ["char", "<em>（擦拭着杯子，抬起头微笑）</em>欢迎光临旅店，旅人。<q>第一杯蜂蜜酒算我请的。</q>🍻", "Seraphina"],
+        ["char", "<em>（擦拭着杯子，抬起头微笑——心理描写用斜体）</em>欢迎光临旅店，旅人。<q>「第一杯蜂蜜酒算我请的。」对话用引号</q> 🍻", "Seraphina"],
         ["user", "（推开门，抖了抖肩上的雪）路上遇到暴风雪了。"],
-        ["char", "哎呀，瞧你一身雪。快到壁炉边坐，我给你倒杯热的。", "Seraphina"],
-        ["user", "多谢。<u>这里比传闻中还要热闹啊。</u>"],
-        ["char", "哈哈，那边吟游诗人刚讲了个龙的笑话，整个旅店都笑了。想听吗？", "Seraphina"],
+        ["char", "哎呀，瞧你一身雪。快到壁炉边坐，我给你倒杯热的。<u>下划线强调：壁炉旁很暖和。</u>", "Seraphina"],
+        ["user", "多谢。这里比传闻中还要热闹啊。"],
+        ["char", "<strong>加粗旁白：</strong>吟游诗人刚讲了个龙的笑话。<em>（她眨了眨眼）</em>", "Seraphina"],
         ["user", "当然，我最喜欢龙的笑话。"],
         ["char", "龙走进旅店，所有人都跑光了——因为它根本挤不进门！😄", "Seraphina"],
         ["user", "（喷出一口蜂蜜酒）哈哈哈这也太冷了！"],
@@ -656,7 +657,7 @@
         const keep = new Set(mes.slice(-msgCount));
         mes.forEach(el => { if (!keep.has(el)) el.remove(); });
     }
-    function buildPureTavernPreviewHTML({ msgCount = 3, themeCss = "" } = {}) {
+    function buildPureTavernPreviewHTML({ msgCount = 3, themeCss = "", scene = "chat" } = {}) {
         const msgs = [];
         for (let i = 0; i < msgCount; i++) {
             const [who, body, name] = CHAT[i % CHAT.length];
@@ -676,60 +677,232 @@
   </div>
 </div>`);
         }
-        const styles = collectParentStylesHtml();
+        // 只用父页 CSS 变量 + 主题 CSS；结构用自带 BASE 布局，避免父页把高度压成一半
         const rootVars = collectRootCssVars();
         const safeCss = String(themeCss).replace(/<\/(style|script)/gi, "<\\/$1");
-        const layoutFallback = `
-html, body { height: 100%; margin: 0; }
-body {
-  display: flex; flex-direction: column;
-  background: var(--SmartThemeBlurTintColor, #181825);
-  color: var(--SmartThemeBodyColor, #e6e6ef);
-  font-family: system-ui, "Segoe UI", "Microsoft YaHei", sans-serif;
-  overflow: hidden;
+        const sc = ["chat", "welcome", "character", "extensions"].includes(scene) ? scene : "chat";
+        const shell = `
+html, body { height: 100% !important; width: 100% !important; margin: 0 !important; padding: 0 !important; }
+body.tm-sandbox {
+  display: flex !important; flex-direction: column !important;
+  height: 100% !important; min-height: 100% !important; overflow: hidden !important;
+  background: var(--SmartThemeBlurTintColor, #181825) !important;
+  color: var(--SmartThemeBodyColor, #e6e6ef) !important;
+  font-family: system-ui, "Segoe UI", "Microsoft YaHei", sans-serif !important;
 }
-#sheld { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0; width: 100%; }
-#chat { flex: 1 1 auto; overflow-y: auto; min-height: 0; }
-#form_sheld, #send_form { flex: 0 0 auto; }
-.tm-hint { text-align: center; font-size: 11px; opacity: .45; padding: 8px; }
+/* 顶栏 */
+#top-bar {
+  flex: 0 0 auto !important; display: flex !important; align-items: center !important;
+  justify-content: space-between !important; gap: 8px !important;
+  padding: 8px 12px !important;
+  border-bottom: 1px solid var(--SmartThemeBorderColor, rgba(255,255,255,.12)) !important;
+  background: color-mix(in srgb, var(--SmartThemeBlurTintColor, #181825) 88%, #000) !important;
+}
+#top-bar .logo { font-weight: 600; font-size: 13px; opacity: .9; }
+#top-bar .icons { display: flex; gap: 10px; opacity: .7; font-size: 14px; }
+/* 主壳：PC 可出现侧栏 */
+#tm-app {
+  flex: 1 1 auto !important; min-height: 0 !important;
+  display: flex !important; flex-direction: row !important; width: 100% !important;
+}
+#left-nav-panel, #right-nav-panel {
+  flex: 0 0 200px; max-width: 28%; min-width: 0;
+  border-right: 1px solid var(--SmartThemeBorderColor, rgba(255,255,255,.1));
+  background: color-mix(in srgb, var(--SmartThemeBlurTintColor, #181825) 92%, #000);
+  overflow: auto; padding: 10px; font-size: 12px;
+}
+#right-nav-panel { border-right: 0; border-left: 1px solid var(--SmartThemeBorderColor, rgba(255,255,255,.1)); }
+#left-nav-panel h4, #right-nav-panel h4 { margin: 0 0 8px; font-size: 12px; opacity: .75; }
+#left-nav-panel .item, #right-nav-panel .item {
+  padding: 8px 10px; border-radius: 8px; margin-bottom: 4px;
+  border: 1px solid transparent;
+}
+#left-nav-panel .item:hover, #right-nav-panel .item:hover {
+  border-color: var(--SmartThemeBorderColor, rgba(255,255,255,.15));
+  background: rgba(255,255,255,.04);
+}
+#sheld {
+  flex: 1 1 auto !important; min-width: 0 !important; min-height: 0 !important;
+  display: flex !important; flex-direction: column !important;
+}
+/* 场景 */
+.tm-scene { display: none !important; flex: 1 1 auto !important; min-height: 0 !important; flex-direction: column !important; }
+.tm-scene.active { display: flex !important; }
+#chat {
+  flex: 1 1 auto !important; min-height: 0 !important; overflow-y: auto !important;
+  padding: 10px 12px !important;
+}
+#form_sheld { flex: 0 0 auto !important; }
+#send_form {
+  display: flex !important; align-items: flex-end !important; gap: 8px !important;
+  padding: 10px 12px !important;
+  border-top: 1px solid var(--SmartThemeBorderColor, rgba(255,255,255,.12)) !important;
+  background: color-mix(in srgb, var(--SmartThemeBlurTintColor, #181825) 90%, #000) !important;
+}
+#send_textarea {
+  flex: 1 !important; min-height: 38px !important; max-height: 90px !important;
+  resize: none !important; padding: 8px 12px !important; border-radius: 12px !important;
+  border: 1px solid var(--SmartThemeBorderColor, rgba(255,255,255,.15)) !important;
+  background: rgba(255,255,255,.06) !important; color: inherit !important; font: inherit !important;
+}
+#options_button, #send_but, #mes_stop {
+  width: 36px; height: 36px; display: grid; place-items: center; border-radius: 10px;
+  border: 1px solid var(--SmartThemeBorderColor, rgba(255,255,255,.12));
+}
+#send_but { border-radius: 50%; background: var(--SmartThemeQuoteColor, #5b6ee1); color: #fff; border: 0; }
+/* 消息 */
+.mes { display: flex; gap: 10px; margin: 12px 0; align-items: flex-start; }
+.mes.is_user { flex-direction: row-reverse; }
+.mesAvatarWrapper, .avatar { width: 44px; height: 44px; flex: 0 0 auto; }
+.avatar { border-radius: 50%; overflow: hidden; }
+.avatar img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.mes_block { max-width: min(92%, 520px); min-width: 0; }
+.ch_name { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; font-size: 12px; opacity: .75; }
+.mes_buttons { opacity: .35; }
+.mes_text {
+  padding: 10px 12px; border-radius: 14px; white-space: pre-wrap; word-break: break-word;
+  background: var(--SmartThemeBotMesBlurTintColor, rgba(255,255,255,.06));
+  border: 1px solid var(--SmartThemeBorderColor, transparent);
+  color: var(--SmartThemeBodyColor, inherit);
+  line-height: 1.65;
+}
+.mes.is_user .mes_text {
+  background: var(--SmartThemeUserMesBlurTintColor, rgba(255,255,255,.1));
+}
+.mes_text em { color: var(--SmartThemeEmColor, #b8e0c8); font-style: italic; }
+.mes_text u { color: var(--SmartThemeUnderlineColor, #b8e0c8); text-decoration: underline; }
+.mes_text q { color: var(--SmartThemeQuoteColor, #e0a86a); quotes: "「" "」"; }
+.mes_text strong { font-weight: 700; }
+/* 卡片场景 */
+.tm-panel-scroll { flex: 1; overflow: auto; padding: 14px; }
+.tm-panel-card {
+  border: 1px solid var(--SmartThemeBorderColor, rgba(255,255,255,.12));
+  background: var(--SmartThemeBotMesBlurTintColor, rgba(255,255,255,.05));
+  border-radius: 14px; padding: 14px; margin-bottom: 12px;
+}
+.tm-panel-card h3 { margin: 0 0 8px; font-size: 15px; }
+.tm-panel-card p { margin: 6px 0; line-height: 1.6; opacity: .92; }
+.tm-char-grid { display: flex; gap: 14px; align-items: flex-start; }
+.tm-char-grid img { width: 72px; height: 72px; border-radius: 16px; object-fit: cover; }
+.tm-ext-list { display: flex; flex-direction: column; gap: 6px; }
+.tm-ext-item {
+  display: flex; justify-content: space-between; gap: 8px;
+  padding: 10px 12px; border-radius: 10px;
+  border: 1px solid var(--SmartThemeBorderColor, rgba(255,255,255,.1));
+}
+.tm-hint { text-align: center; font-size: 11px; opacity: .4; padding: 8px; }
 .tm-hl { outline: 2px solid #ff6b6b !important; box-shadow: 0 0 0 4px rgba(255,107,107,.35) !important; }
+/* 窄屏隐藏侧栏（手机预览） */
+@media (max-width: 700px) {
+  #left-nav-panel, #right-nav-panel { display: none !important; }
+}
 `;
         return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<base href="${String(location.href).replace(/"/g, "&quot;")}">
-${styles}
 <style id="tm-clone-rootvars">${rootVars}</style>
-<style id="tm-pure-layout">${layoutFallback}</style>
+<style id="tm-pure-layout">${shell}</style>
 <style id="tm-preview-style">${safeCss}</style>
 </head>
-<body class="${(document.body && document.body.className) || ""}">
+<body class="tm-sandbox">
 <div id="top-bar">
-  <div id="nav-toggle">☰</div>
-  <div id="site-logo">SillyTavern · 纯净 CSS 预览</div>
-  <div id="top-bar-icons"><span>⚙️</span></div>
+  <div class="logo">SillyTavern · 多页面预览</div>
+  <div class="icons"><span title="角色">👤</span><span title="世界书">📘</span><span title="扩展">🧩</span><span title="设置">⚙️</span></div>
 </div>
-<div id="sheld">
-  <div id="chat">
-    ${msgs.join("\n")}
-    <div class="tm-hint">— 父页全套 CSS + 干净 DOM（${msgCount} 条）· 非页面克隆 —</div>
-  </div>
-  <div id="form_sheld">
-    <div id="send_form">
-      <div id="leftSendForm"><div id="options_button">☰</div></div>
-      <textarea id="send_textarea" rows="1" placeholder="在此输入消息…" readonly></textarea>
-      <div id="rightSendForm">
-        <div id="mes_stop">■</div>
-        <div id="send_but">➤</div>
+<div id="tm-app">
+  <aside id="left-nav-panel">
+    <h4>最近的聊天</h4>
+    <div class="item">⭐ 星心桃说喵</div>
+    <div class="item">📘 陈步青</div>
+    <div class="item">🤖 Assistant</div>
+    <h4 style="margin-top:14px">角色</h4>
+    <div class="item">Seraphina</div>
+    <div class="item">旅人</div>
+  </aside>
+  <div id="sheld">
+    <div class="tm-scene ${sc === "chat" ? "active" : ""}" data-scene="chat">
+      <div id="chat">
+        ${msgs.join("\n")}
+        <div class="tm-hint">— 聊天 · 含 斜体/下划线/引用/加粗 —</div>
+      </div>
+      <div id="form_sheld">
+        <div id="send_form">
+          <div id="options_button">☰</div>
+          <textarea id="send_textarea" rows="1" placeholder="在此输入消息…" readonly></textarea>
+          <div id="send_but">➤</div>
+        </div>
+      </div>
+    </div>
+    <div class="tm-scene ${sc === "welcome" ? "active" : ""}" data-scene="welcome">
+      <div class="tm-panel-scroll">
+        <div class="tm-panel-card">
+          <h3>欢迎来到 SillyTavern</h3>
+          <p>检查全局背景、卡片、标题与正文颜色。</p>
+          <p><em>斜体提示</em> · <u>下划线链接</u> · <q>「引用句」</q> · <strong>加粗</strong></p>
+        </div>
+        <div class="tm-panel-card">
+          <h3>最近的聊天</h3>
+          <p>⭐ 星心桃说喵 — 示例</p>
+          <p>📘 陈步青 — 示例</p>
+          <p>🤖 Assistant — 示例</p>
+        </div>
+        <div class="tm-hint">— 欢迎页场景 —</div>
+      </div>
+    </div>
+    <div class="tm-scene ${sc === "character" ? "active" : ""}" data-scene="character">
+      <div class="tm-panel-scroll">
+        <div class="tm-panel-card">
+          <div class="tm-char-grid">
+            <img src="${AV_CHAR}" alt="avatar">
+            <div>
+              <h3>Seraphina</h3>
+              <p><strong>人设：</strong>旅店老板娘，擅长热红酒与冷笑话。</p>
+              <p><em>（她把一杯热饮推到你面前）</em></p>
+              <p><q>「坐吧，旅人。外面的雪还在下。」</q></p>
+              <p><u>标签：奇幻 · 日常 · 治愈</u></p>
+            </div>
+          </div>
+        </div>
+        <div class="tm-panel-card">
+          <h3>角色说明 / 世界书摘要</h3>
+          <p>用于预览角色面板、描述区、引用与强调色。</p>
+        </div>
+        <div class="tm-hint">— 角色卡场景 —</div>
+      </div>
+    </div>
+    <div class="tm-scene ${sc === "extensions" ? "active" : ""}" data-scene="extensions">
+      <div class="tm-panel-scroll">
+        <div class="tm-panel-card">
+          <h3>扩展列表示意</h3>
+          <div class="tm-ext-list">
+            <div class="tm-ext-item"><span>美化管理 Theme Manager</span><span style="opacity:.6">已启用</span></div>
+            <div class="tm-ext-item"><span>CSS Snippets</span><span style="opacity:.6">可选</span></div>
+            <div class="tm-ext-item"><span>正则 / 世界书 / TTS…</span><span style="opacity:.6">示意</span></div>
+          </div>
+        </div>
+        <div class="tm-panel-card">
+          <h3>设置项示意</h3>
+          <p>检查菜单、列表行、开关旁文字对比度与边框。</p>
+        </div>
+        <div class="tm-hint">— 扩展 / 设置场景 —</div>
       </div>
     </div>
   </div>
+  <aside id="right-nav-panel">
+    <h4>扩展 / 面板</h4>
+    <div class="item">API 连接</div>
+    <div class="item">角色管理</div>
+    <div class="item">世界书</div>
+    <div class="item">美化管理</div>
+    <div class="item">用户设置</div>
+  </aside>
 </div>
 </body>
 </html>`;
     }
+
     function buildCloneChatHTML(opts) {
         // 保留兼容名：编辑场景请用 pure，不再克隆脏 DOM
         return buildPureTavernPreviewHTML(opts);
@@ -743,9 +916,9 @@ ${styles}
         pc:        { w: 1920, h: 940, icon: "🖥", label: "PC" },
     };
     class PreviewManager {
-        constructor($root, { msgCount = 3, device = "mobile", onCapture = null, mode = "pure" } = {}) {
+        constructor($root, { msgCount = 3, device = "mobile", onCapture = null, mode = "pure", scene = "chat" } = {}) {
             this.$root = $root; this.msgCount = msgCount; this.device = device; this.css = "";
-            this.onCapture = onCapture;
+            this.onCapture = onCapture; this.scene = scene || "chat";
             this.mode = (mode === "mock" || mode === "clone" || mode === "pure") ? mode : "pure";
             this._built = false;
             this._onWinResize = () => this.relayout();
@@ -759,6 +932,12 @@ ${styles}
 	    ${Object.entries(DEVICES).map(([k, d]) =>
 	        `<button class="menu_button tm-dev" data-dev="${k}" title="${d.w} × ${d.h}">${d.icon}${d.label}</button>`).join("")}
 	  </div>
+	  <div class="tm-prev-scenes">
+	    <button class="menu_button tm-scene tm-on" data-scene="chat">聊天</button>
+	    <button class="menu_button tm-scene" data-scene="welcome">欢迎</button>
+	    <button class="menu_button tm-scene" data-scene="character">角色</button>
+	    <button class="menu_button tm-scene" data-scene="extensions">扩展</button>
+	  </div>
 	  <div class="tm-prev-right">
 	    <select class="tm-msg-count" title="聊天长度模拟">
 	      <option value="3">3 条</option><option value="20">20 条</option>
@@ -767,11 +946,12 @@ ${styles}
 	    <button class="menu_button tm-capture" title="生成预览图">📸</button>
 	  </div>
 	</div>
-	<div class="tm-prev-stage"><div class="tm-prev-framebox"><iframe class="tm-prev-frame" sandbox="allow-same-origin"></iframe></div></div>`);
+	<div class="tm-prev-stage"><div class="tm-prev-framebox"><iframe class="tm-prev-frame" sandbox="allow-same-origin allow-scripts"></iframe></div></div>`);
             this.$frame = this.$root.find(".tm-prev-frame");
             this.$box   = this.$root.find(".tm-prev-framebox");
             this.$stage = this.$root.find(".tm-prev-stage");
             this.$root.find(".tm-dev").on("click", e => this.setDevice($(e.currentTarget).data("dev")));
+            this.$root.find(".tm-scene").on("click", e => this.setScene($(e.currentTarget).data("scene")));
             this.$root.find(".tm-msg-count").on("change", e => this.setMsgCount(Number(e.target.value)));
             this.$root.find(".tm-refresh").on("click", () => this.rebuild());
             this.$root.find(".tm-capture").on("click", () => this.onCapture?.());
@@ -787,6 +967,12 @@ ${styles}
             this.relayout();
         }
         setMsgCount(n) { this.msgCount = n; this.$root.find(".tm-msg-count").val(String(n)); this.rebuild(); }
+        setScene(sc) {
+            this.scene = sc || "chat";
+            this.$root.find(".tm-scene").removeClass("tm-on");
+            this.$root.find(`.tm-scene[data-scene="${this.scene}"]`).addClass("tm-on");
+            this.rebuild();
+        }
         relayout() {
             if (!this.$frame) return;
             const d = DEVICES[this.device];
@@ -799,11 +985,11 @@ ${styles}
             if (!this.$frame) return;
             const frame = this.$frame[0];
             frame.onload = () => { this.setCss(this.css); this.relayout(); };
-            // pure：父页全套 CSS + 干净聊天 DOM（编辑默认）
-            // mock：仅内置 BASE_CSS（缩略图等轻量场景）
+            // pure：多页面壳 + CSS 变量 + 主题（编辑默认，布局自控不半高）
+            // mock：轻量 BASE_CSS（缩略图）
             const html = this.mode === "mock"
                 ? buildMockChatHTML({ msgCount: this.msgCount, themeCss: this.css })
-                : buildPureTavernPreviewHTML({ msgCount: this.msgCount, themeCss: this.css });
+                : buildPureTavernPreviewHTML({ msgCount: this.msgCount, themeCss: this.css, scene: this.scene });
             frame.srcdoc = html;
         }
         setCss(css) {
@@ -1418,12 +1604,18 @@ ${styles}
         else for (const t of arr) $list.append(cardHtml(t));
         $list.scrollTop(st);
         renderQuickSwitch();
-        // 异步从 IndexedDB 补齐预览（不阻塞、不写 settings）
+        // 异步：IDB 补齐 + 缺失则后台生成缩略图（限流）
         Promise.all(arr.map(async t => {
             if (getPreviewSync(t.id)) return false;
             const v = await hydratePreview(t.id);
             return !!v;
-        })).then(flags => { if (flags.some(Boolean)) renderList(); });
+        })).then(flags => {
+            if (flags.some(Boolean)) renderList();
+            const missing = arr.filter(t => !getPreviewSync(t.id)).slice(0, 4);
+            missing.forEach((t, i) => {
+                setTimeout(() => generatePreview(t.id).then(ok => { if (ok) renderList(); }), 200 + i * 400);
+            });
+        });
     }
 
     /* ---------- M2+M3.1 编辑屏 ---------- */
